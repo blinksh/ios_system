@@ -93,6 +93,8 @@ extern int bibtex_main(int argc, char *argv[]);
 extern int dllluatexmain(int argc, char *argv[]);
 extern int dllpdftexmain(int argc, char *argv[]);
 #endif
+static int xcrun_main(int argc, char* argv[]);
+static int pkgconfig_main(int argc, char* argv[]);
 
 extern int    __db_getopt_reset;
 typedef struct _functionParameters {
@@ -244,7 +246,23 @@ static void initializeCommandList()
                     // BibTeX
                     @"bibtex"     : [NSValue valueWithPointer: bibtex_main],
 #endif
+                    // for auto-install packages. Won't help, but won't stop
+                    @"xcrun" : [NSValue valueWithPointer: xcrun_main],
+                    @"pkg-config" : [NSValue valueWithPointer: pkgconfig_main],
                     };
+}
+
+static int xcrun_main(int argc, char* argv[])
+{
+    if ((argc > 2) && (strcmp(argv[1], "-find") == 0))
+        fprintf(stdout, argv[2]);
+    return 1;
+}
+
+static int pkgconfig_main(int argc, char* argv[])
+{
+    // Don't do anything. It should prevent build from stopping
+    return 1;
 }
 
 int ios_executable(char* inputCmd) {
@@ -257,6 +275,17 @@ int ios_executable(char* inputCmd) {
     else return 0;
 }
 
+
+
+char* commandsAsString() {
+
+	if (commandList == nil) initializeCommandList();
+	NSError * err;
+	NSData * jsonData = [NSJSONSerialization  dataWithJSONObject:commandList.allKeys options:0 error:&err];
+	NSString * myString = [[NSString alloc] initWithData:jsonData encoding:NSUTF8StringEncoding];
+
+	return myString.cString;
+}
 
 int ios_system(char* inputCmd) {
     char* command;
@@ -372,6 +401,10 @@ int ios_system(char* inputCmd) {
     if (errorFileMarker) errorFileMarker[0] = 0x0;
     // Store previous values of stdin, stdout, stderr:
     // fprintf(stdout, "before, stderr = %x\n", (void*)stderr);
+    // strip filenames of quotes, if any:
+    if (outputFileName && (outputFileName[0] == '\'')) { outputFileName = outputFileName + 1; outputFileName[strlen(outputFileName) - 1] = 0x0; }
+    if (inputFileName && (inputFileName[0] == '\'')) { inputFileName = inputFileName + 1; inputFileName[strlen(inputFileName) - 1] = 0x0; }
+    if (errorFileName && (errorFileName[0] == '\'')) { errorFileName = errorFileName + 1; errorFileName[strlen(errorFileName) - 1] = 0x0; }
     FILE* push_stdin = stdin;
     FILE* push_stdout = stdout;
     FILE* push_stderr = stderr;
@@ -532,6 +565,7 @@ int ios_system(char* inputCmd) {
             pthread_join(_tid, NULL);
             // free(params);
         } else {
+            // TODO: this should also raise an exception, for python scripts
             fprintf(stderr, "%s: command not found\n", argv[0]);
         }
     }
