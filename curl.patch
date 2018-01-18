@@ -1,6 +1,6 @@
 diff -Naur curl-105/config_iphone/curl_config.h curl/config_iphone/curl_config.h
 --- curl-105/config_iphone/curl_config.h	2017-05-24 02:47:37.000000000 +0200
-+++ curl/config_iphone/curl_config.h	2017-12-09 00:12:58.000000000 +0100
++++ curl/config_iphone/curl_config.h	2018-01-07 17:01:51.000000000 +0100
 @@ -410,6 +410,7 @@
  
  /* Define to 1 if you have the <libssh2.h> header file. */
@@ -36,7 +36,7 @@ diff -Naur curl-105/config_iphone/curl_config.h curl/config_iphone/curl_config.h
  /* #undef USE_NSS */
 diff -Naur curl-105/curl/include/curl/curl.h curl/curl/include/curl/curl.h
 --- curl-105/curl/include/curl/curl.h	2017-05-17 21:04:33.000000000 +0200
-+++ curl/curl/include/curl/curl.h	2017-12-09 00:12:58.000000000 +0100
++++ curl/curl/include/curl/curl.h	2018-01-07 17:01:49.000000000 +0100
 @@ -2391,7 +2391,7 @@
                             callback functions */
    CURLSHOPT_LAST  /* never use */
@@ -48,7 +48,7 @@ diff -Naur curl-105/curl/include/curl/curl.h curl/curl/include/curl/curl.h
  CURL_EXTERN CURLSHcode curl_share_cleanup(CURLSH *);
 diff -Naur curl-105/curl/lib/netrc.c curl/curl/lib/netrc.c
 --- curl-105/curl/lib/netrc.c	2016-11-04 22:42:50.000000000 +0100
-+++ curl/curl/lib/netrc.c	2017-12-09 00:12:58.000000000 +0100
++++ curl/curl/lib/netrc.c	2018-01-07 17:01:51.000000000 +0100
 @@ -69,7 +69,8 @@
  
    if(!netrcfile) {
@@ -61,7 +61,7 @@ diff -Naur curl-105/curl/lib/netrc.c curl/curl/lib/netrc.c
  #if defined(HAVE_GETPWUID_R) && defined(HAVE_GETEUID)
 diff -Naur curl-105/curl/lib/ssh.c curl/curl/lib/ssh.c
 --- curl-105/curl/lib/ssh.c	2017-05-17 21:04:33.000000000 +0200
-+++ curl/curl/lib/ssh.c	2017-12-11 17:22:53.000000000 +0100
++++ curl/curl/lib/ssh.c	2018-01-10 10:20:38.000000000 +0100
 @@ -26,6 +26,13 @@
  
  #ifdef USE_LIBSSH2
@@ -252,9 +252,91 @@ diff -Naur curl-105/curl/lib/ssh.c curl/curl/lib/ssh.c
        }
 diff -Naur curl-105/curl/src/tool_main.c curl/curl/src/tool_main.c
 --- curl-105/curl/src/tool_main.c	2016-07-06 23:44:05.000000000 +0200
-+++ curl/curl/src/tool_main.c	2017-12-09 00:12:58.000000000 +0100
-@@ -229,7 +229,11 @@
++++ curl/curl/src/tool_main.c	2018-01-12 14:20:06.000000000 +0100
+@@ -227,10 +227,98 @@
+ }
+ 
  /*
++ * iOS_system specifics: if the call is actually scp or sftp, we convert it to curl proper.
++ * scp user@host:~/distantFile localFile => curl scp://user@host/~/distantFile -o localFile
++ * scp user@host:/path/distantFile localFile => curl scp://user@host//path/distantFile -o localFile
++ * scp user@host:~/distantFile . => curl scp://user@host/~/distantFile -O
++ * scp user@host:~/distantFile /path/ => curl scp://user@host/~/distantFile -o /path/distantFile
++ * scp localFile user@host:~/path/       => curl -T localFile scp://user@host/~/path/localFile
++ */
++#ifdef BLINKSHELL
++int curl_static_main(int argc, char *argv[]);
++#else
++int curl_main(int argc, char *argv[]);
++#endif
++
++static int scp_convert(int argc, char* argv[]) {
++    int argc2 = 0;
++    int i = 1;
++    char** argv2 = (char**) malloc((argc + 2) * sizeof(char*));
++    char* localFileName = NULL;
++    char* distantFileName = NULL;
++    char* protocol = argv[0];
++    argv2[0] = strdup("curl");
++    for (i = 1, argc2 = 1; i < argc; i++, argc2++) {
++        // it's just a flag:
++        if ((argv[i][0] == '-') || (distantFileName && localFileName)) {
++            // scp -q (quiet) is equivalent to curl -s (silent)
++            if (strcmp(argv[i], "-q") == 0) argv2[argc2] = strdup("-s");
++            else argv2[argc2] = strdup(argv[i]);
++            continue;
++        }
++        char* position;
++        if ((position = strstr(argv[i], ":")) != NULL) {
++            // distant file
++            distantFileName = position + 1; // after the ":"
++            *position = 0; // split argv[i] into "user@host" and distantFileName
++            asprintf(argv2 + argc2, "%s://%s/%s", protocol, argv[i], distantFileName);
++            // get the actual filename
++            while ((position = strstr(distantFileName, "/")) != NULL) distantFileName = position + 1;
++        } else {
++            // Not beginning with "-", not containing ":", must be a local filename
++            // if it's ".", replace with -O
++            // if it's a directory, add name of file from previous argument at the end.
++            localFileName = argv[i];
++            if (!distantFileName) {
++                // local file before remote file: upload
++                argv2[argc2] = strdup("-T"); argc2++;
++                argv2[argc2] = strdup(argv[i]);
++            } else { // download
++                if ((strlen(argv[i]) == 1) && (strcmp(argv[i], ".") == 0)) argv2[argc2] = strdup("-O");
++                else {
++                    argv2[argc2] = strdup("-o"); argc2++;
++                    if (argv[i][strlen(argv[i]) - 1] == '/') {
++                        // if localFileName ends with '/' we assume it's a directory
++                        asprintf(argv2 + argc2, "%s%s", localFileName, distantFileName);
++                    } else {
++                        struct stat localFileBuf;
++                        bool localFileExists = (stat(localFileName, &localFileBuf) == 0);
++                        int localFileIsDir = S_ISDIR(localFileBuf.st_mode);
++                        if (localFileExists && localFileIsDir) {
++                            // localFileName exists *and* is a directory: concatenate distantFileName to directory
++                            asprintf(argv2 + argc2, "%s/%s", localFileName, distantFileName);
++                        } else {
++                            // all other cases: localFileName is name of output
++                            argv2[argc2] = strdup(argv[i]);
++                        }
++                    }
++                }
++            }
++        }
++    }
++    argv2[argc2] = NULL;
++#ifdef BLINKSHELL
++    int returnValue = curl_static_main(argc2, argv2);
++#else
++    int returnValue = curl_main(argc2, argv2);
++#endif
++    for (int i = 0; i < argc2; i++) free(argv2[i]);
++    free(argv2);
++    return returnValue;
++}
++/*
  ** curl tool main function.
  */
 -int main(int argc, char *argv[])
@@ -264,11 +346,16 @@ diff -Naur curl-105/curl/src/tool_main.c curl/curl/src/tool_main.c
 +int curl_main(int argc, char *argv[])
 +#endif
  {
++    // scp, sftp: edit arguments and relaunch
++    if ((strcmp(argv[0], "scp") == 0) || (strcmp(argv[0], "sftp") == 0)) {
++        return scp_convert(argc, argv);
++    }
    CURLcode result = CURLE_OK;
    struct GlobalConfig global;
+   memset(&global, 0, sizeof(global));
 diff -Naur curl-105/curl/src/tool_operate.c curl/curl/src/tool_operate.c
 --- curl-105/curl/src/tool_operate.c	2017-05-17 21:04:33.000000000 +0200
-+++ curl/curl/src/tool_operate.c	2017-12-09 00:12:58.000000000 +0100
++++ curl/curl/src/tool_operate.c	2018-01-07 17:01:51.000000000 +0100
 @@ -41,6 +41,9 @@
  
  #include "strcase.h"

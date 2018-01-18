@@ -18,6 +18,7 @@
 
 #include <pthread.h>
 #include <sys/stat.h>
+#define S_ISXXX(m) ((m) & (S_IXUSR | S_IXGRP | S_IXOTH)) // is executable, looking at "x" bit. Other methods fails on iOS
 
 // Note: we could use dlsym() to make this code simpler, but it would also make it harder
 // to be accepted in the AppleStore. Dynamic libraries are already loaded, so it would be:
@@ -68,6 +69,7 @@ extern int curl_main(int argc, char **argv);
 
 #ifdef SHELL_UTILITIES
 extern int date_main(int argc, char *argv[]);
+extern int echo_main(int argc, char *argv[]);
 extern int env_main(int argc, char *argv[]);     // does the same as printenv
 extern int hostname_main(int argc, char *argv[]);
 extern int id_main(int argc, char *argv[]); // also groups, whoami
@@ -80,6 +82,10 @@ extern int w_main(int argc, char *argv[]); // also uptime
 extern int cat_main(int argc, char *argv[]);
 extern int grep_main(int argc, char *argv[]);
 extern int wc_main(int argc, char *argv[]);
+extern int ed_main(int argc, char *argv[]);
+extern int tr_main(int argc, char *argv[]);
+extern int sed_main(int argc, char *argv[]);
+extern int awk_main(int argc, char *argv[]);
 #endif
 #ifdef FEAT_LUA
 extern int lua_main(int argc, char *argv[]);
@@ -96,6 +102,7 @@ extern int dllpdftexmain(int argc, char *argv[]);
 // local commands
 static int setenv_main(int argc, char *argv[]);
 static int unsetenv_main(int argc, char *argv[]);
+static int cd_main(int argc, char *argv[]);
 
 extern int    __db_getopt_reset;
 typedef struct _functionParameters {
@@ -126,16 +133,19 @@ static void* run_function(void* parameters) {
     return NULL;
 }
 
+static NSString* miniRoot = nil; // limit operations to below a certain directory (~, usually).
 static NSDictionary *commandList = nil;
 // do recompute directoriesInPath only if $PATH has changed
 static NSString* fullCommandPath = @"";
 static NSArray *directoriesInPath;
+static NSString* previousDirectory;
 
 void initializeEnvironment() {
     // setup a few useful environment variables
     // Initialize paths for application files, including history.txt and keys
     NSString *docsPath = [NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES) lastObject];
     NSString *libPath = [NSSearchPathForDirectoriesInDomains(NSLibraryDirectory, NSUserDomainMask, YES) lastObject];
+    previousDirectory = [[NSFileManager defaultManager] currentDirectoryPath];
     
     // Where the executables are stored: $PATH + ~/Library/bin + ~/Documents/bin
     // Add content of old PATH to this. PATH *is* defined in iOS, surprising as it may be.
@@ -155,6 +165,7 @@ void initializeEnvironment() {
     }
     setenv("APPDIR", [[NSBundle mainBundle] resourcePath].UTF8String, 1);
     setenv("PATH", fullCommandPath.UTF8String, 1); // 1 = override existing value
+    setenv("TERM", "xterm", 1); // 1 = override existing value
     directoriesInPath = [fullCommandPath componentsSeparatedByString:@":"];
     
     // We can't write in $HOME so we need to set the position of config files:
@@ -173,12 +184,13 @@ void initializeEnvironment() {
 #endif
 }
 
-static char* parseArgument(char* argument) {
+static char* parseArgument(char* argument, char* command) {
     // expand all environment variables, convert "~" to $HOME (only if localFile)
+    // we also pass the shell command for some specific behaviour (don't do this for that command)
     NSString* argumentString = [NSString stringWithCString:argument encoding:NSASCIIStringEncoding];
     // 1) expand environment variables, + "~" (not wildcards ? and *)
     bool cannotExpand = false;
-    while ([argumentString containsString:@"$"]) {
+    while ([argumentString containsString:@"$"] && !cannotExpand) {
         // It has environment variables inside. Work on them one by one.
         // position of first "$" sign:
         NSRange r1 = [argumentString rangeOfString:@"$"];
@@ -203,32 +215,41 @@ static char* parseArgument(char* argument) {
     // If there are multiple users on iOS, this code will need to be changed.
     if([argumentString hasPrefix:@"~"]) {
         // So it begins with "~".
-        argumentString = [argumentString stringByExpandingTildeInPath]; // replaces "~", "~/"
-        if ([argumentString hasPrefix:@"~:"]) { // not done by stringByExpandingTildeInPath
+        if (miniRoot == nil) argumentString = [argumentString stringByExpandingTildeInPath]; // replaces "~", "~/"
+        if ((miniRoot != nil) || ([argumentString hasPrefix:@"~:"])) { // not done by stringByExpandingTildeInPath
             NSString* test_string = @"~";
-            NSString* replacement_string = [NSString stringWithCString:(getenv("HOME")) encoding:NSASCIIStringEncoding];
+            NSString* replacement_string;
+            if (miniRoot == nil)
+                replacement_string = [NSString stringWithCString:(getenv("HOME")) encoding:NSASCIIStringEncoding];
+            else replacement_string = miniRoot;
             argumentString = [argumentString stringByReplacingOccurrencesOfString:test_string withString:replacement_string options:NULL range:NSMakeRange(0, 1)];
         }
     }
     // Also convert ":~something" in PATH style variables
     // We don't use these yet, but we could.
-    // This is something we need to avoid if the command is "scp" or "sftp"
-    if ([argumentString containsString:@":~"]) {
-        // Only 1 possibility: ":~" (same as $HOME)
-        if (getenv("HOME")) {
-            if ([argumentString containsString:@":~/"]) {
-                NSString* test_string = @":~/";
-                NSString* replacement_string = [[NSString stringWithCString:":" encoding:NSASCIIStringEncoding] stringByAppendingString:[NSString stringWithCString:(getenv("HOME")) encoding:NSASCIIStringEncoding]];
-                replacement_string = [replacement_string stringByAppendingString:[NSString stringWithCString:"/" encoding:NSASCIIStringEncoding]];
-                argumentString = [argumentString stringByReplacingOccurrencesOfString:test_string withString:replacement_string];
-            } else if ([argumentString hasSuffix:@":~"]) {
-                NSString* test_string = @":~";
-                NSString* replacement_string = [[NSString stringWithCString:":" encoding:NSASCIIStringEncoding] stringByAppendingString:[NSString stringWithCString:(getenv("HOME")) encoding:NSASCIIStringEncoding]];
-                argumentString = [argumentString stringByReplacingOccurrencesOfString:test_string withString:replacement_string options:NULL range:NSMakeRange([argumentString length] - 2, 2)];
-            } else if ([argumentString hasSuffix:@":"]) {
-                NSString* test_string = @":";
-                NSString* replacement_string = [[NSString stringWithCString:":" encoding:NSASCIIStringEncoding] stringByAppendingString:[NSString stringWithCString:(getenv("HOME")) encoding:NSASCIIStringEncoding]];
-                argumentString = [argumentString stringByReplacingOccurrencesOfString:test_string withString:replacement_string options:NULL range:NSMakeRange([argumentString length] - 2, 2)];
+    // We do this expansion only for setenv
+    if (strcmp(command, "setenv") == 0) {
+        // This is something we need to avoid if the command is "scp" or "sftp"
+        if ([argumentString containsString:@":~"]) {
+            NSString* homeDir;
+            if (miniRoot == nil) homeDir = [NSString stringWithCString:(getenv("HOME")) encoding:NSASCIIStringEncoding];
+            else homeDir = miniRoot;
+            // Only 1 possibility: ":~" (same as $HOME)
+            if (homeDir.length > 0) {
+                if ([argumentString containsString:@":~/"]) {
+                    NSString* test_string = @":~/";
+                    NSString* replacement_string = [[NSString stringWithCString:":" encoding:NSASCIIStringEncoding] stringByAppendingString:homeDir];
+                    replacement_string = [replacement_string stringByAppendingString:[NSString stringWithCString:"/" encoding:NSASCIIStringEncoding]];
+                    argumentString = [argumentString stringByReplacingOccurrencesOfString:test_string withString:replacement_string];
+                } else if ([argumentString hasSuffix:@":~"]) {
+                    NSString* test_string = @":~";
+                    NSString* replacement_string = [[NSString stringWithCString:":" encoding:NSASCIIStringEncoding] stringByAppendingString:homeDir];
+                    argumentString = [argumentString stringByReplacingOccurrencesOfString:test_string withString:replacement_string options:NULL range:NSMakeRange([argumentString length] - 2, 2)];
+                } else if ([argumentString hasSuffix:@":"]) {
+                    NSString* test_string = @":";
+                    NSString* replacement_string = [[NSString stringWithCString:":" encoding:NSASCIIStringEncoding] stringByAppendingString:homeDir];
+                    argumentString = [argumentString stringByReplacingOccurrencesOfString:test_string withString:replacement_string options:NULL range:NSMakeRange([argumentString length] - 2, 2)];
+                }
             }
         }
     }
@@ -275,6 +296,7 @@ static void initializeCommandList()
 #endif
 #ifdef SHELL_UTILITIES
                     // Commands from Apple shell_cmds:
+                    @"echo" : [NSValue valueWithPointer: echo_main], 
                     @"printenv": [NSValue valueWithPointer: printenv_main],
                     @"pwd"    : [NSValue valueWithPointer: pwd_main],
                     @"uname"  : [NSValue valueWithPointer: uname_main],
@@ -290,6 +312,12 @@ static void initializeCommandList()
                     // Commands from Apple text_cmds:
                     @"cat"    : [NSValue valueWithPointer: cat_main],
                     @"wc"     : [NSValue valueWithPointer: wc_main],
+                    @"tr"     : [NSValue valueWithPointer: tr_main],
+                    // compiled, but deactivated until we have interactive mode
+//                    @"ed"     : [NSValue valueWithPointer: ed_main],
+//                    @"red"     : [NSValue valueWithPointer: ed_main],
+                    @"sed"     : [NSValue valueWithPointer: sed_main],
+                    @"awk"     : [NSValue valueWithPointer: awk_main],
                     @"grep"   : [NSValue valueWithPointer: grep_main],
                     @"egrep"  : [NSValue valueWithPointer: grep_main],
                     @"fgrep"  : [NSValue valueWithPointer: grep_main],
@@ -305,8 +333,8 @@ static void initializeCommandList()
                     // http, https, ftp... should be OK.
                     @"curl"   : [NSValue valueWithPointer: curl_main],
                     // scp / sftp require conversion to curl, rewriting arguments
-                    // @"scp"    : [NSValue valueWithPointer: curl_main],
-                    // @"sftp"   : [NSValue valueWithPointer: curl_main],
+                    @"scp"    : [NSValue valueWithPointer: curl_main],
+                    @"sftp"   : [NSValue valueWithPointer: curl_main],
 #endif
 #ifdef FEAT_PYTHON
                     // from python:
@@ -357,6 +385,7 @@ static void initializeCommandList()
                     // local commands
                     @"setenv"     : [NSValue valueWithPointer: setenv_main],
                     @"unsetenv"     : [NSValue valueWithPointer: unsetenv_main],
+                    @"cd"     : [NSValue valueWithPointer: cd_main],
                     };
 }
 
@@ -382,7 +411,64 @@ static int unsetenv_main(int argc, char** argv) {
     return 0;
 }
 
-// static void
+int ios_setMiniRoot(NSString* mRoot) {
+    BOOL isDir;
+    if ([[NSFileManager defaultManager] fileExistsAtPath:mRoot isDirectory:&isDir]) {
+        if (isDir) {
+            // fileManager has different ways of expressing the same directory.
+            // We need to actually change to the directory to get its "real name".
+            NSString* currentDir = [[NSFileManager defaultManager] currentDirectoryPath];
+            if ([[NSFileManager defaultManager] changeCurrentDirectoryPath:mRoot]) {
+                // also don't set the miniRoot if we can't go in there
+                // get the real name for miniRoot:
+                miniRoot = [[NSFileManager defaultManager] currentDirectoryPath];
+                // Back to where we we before:
+                [[NSFileManager defaultManager] changeCurrentDirectoryPath:currentDir];
+                return 1; // mission accomplished
+            }
+        }
+    }
+    return 0;
+}
+
+static int cd_main(int argc, char** argv) {
+    NSString* currentDir = [[NSFileManager defaultManager] currentDirectoryPath];
+    if (argc > 1) {
+        NSString* newDir = @(argv[1]);
+        if (strcmp(argv[1], "-") == 0) {
+            // "cd -" option to pop back to previous directory
+            newDir = previousDirectory;
+        }
+        BOOL isDir;
+        if ([[NSFileManager defaultManager] fileExistsAtPath:newDir isDirectory:&isDir]) {
+            if (isDir) {
+                if ([[NSFileManager defaultManager] changeCurrentDirectoryPath:newDir]) {
+                    // We managed to change the directory.
+                    // Was that allowed?
+                    NSString* resultDir = [[NSFileManager defaultManager] currentDirectoryPath];
+                    if ((miniRoot != nil) && (![resultDir hasPrefix:miniRoot])) {
+                        fprintf(stderr, "cd: %s: permission denied\n", [newDir UTF8String]);
+                        [[NSFileManager defaultManager] changeCurrentDirectoryPath:miniRoot];
+                        currentDir = miniRoot;
+                    }
+                    previousDirectory = currentDir;
+                } else fprintf(stderr, "cd: %s: permission denied\n", [newDir UTF8String]);
+            }
+            else  fprintf(stderr, "cd: %s: not a directory\n", [newDir UTF8String]);
+        } else {
+            fprintf(stderr, "cd: %s: no such file or directory\n", [newDir UTF8String]);
+        }
+    } else { // [cd] Help, I'm lost, bring me back home
+        previousDirectory = [[NSFileManager defaultManager] currentDirectoryPath];
+
+        if (miniRoot != nil) {
+            [[NSFileManager defaultManager] changeCurrentDirectoryPath:miniRoot];
+        } else {
+            [[NSFileManager defaultManager] changeCurrentDirectoryPath:[NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES) lastObject]];
+        }
+    }
+    return 0;
+}
 
 int ios_executable(char* inputCmd) {
  // returns 1 if this is one of the commands we define in ios_system, 0 otherwise
@@ -394,16 +480,45 @@ int ios_executable(char* inputCmd) {
     else return 0;
 }
 
+// For customization:
+// replaces a function pointer (e.g. ls_main) with another one, provided by the user (ls_mine_main)
+// if the function does not exist, add it to the list
+// if "allOccurences" is true, search for all commands that share the same function, replace them too.
+// ("compress" and "uncompress" both point to compress_main. You probably want to replace both, but maybe
+// you just happen to have a very fast uncompress, different from compress).
+void replaceCommand(NSString* commandName, int (*newFunction)(int argc, char *argv[]), bool allOccurences) {
+    if (commandList == nil) initializeCommandList();
+    
+    int (*oldFunction)(int ac, char** av) = [[commandList objectForKey: commandName] pointerValue];
+    NSMutableDictionary *mutableDict = [commandList mutableCopy];
+    mutableDict[commandName] = [NSValue valueWithPointer: newFunction];
+    
+    if (oldFunction && allOccurences) {
+        // scan through all dictionary entries
+        
+        for (NSString* existingCommand in mutableDict.allKeys) {
+            int (*existingFunction)(int ac, char** av) = [[mutableDict objectForKey: existingCommand] pointerValue];
+            if (existingFunction == oldFunction) {
+                [mutableDict setValue: [NSValue valueWithPointer: newFunction] forKey: existingCommand];
+            }
+        }
+    }
+    commandList = [mutableDict mutableCopy];
+}
 
-
-char* commandsAsString() {
+NSString* commandsAsString() {
 
 	if (commandList == nil) initializeCommandList();
 	NSError * err;
 	NSData * jsonData = [NSJSONSerialization  dataWithJSONObject:commandList.allKeys options:0 error:&err];
 	NSString * myString = [[NSString alloc] initWithData:jsonData encoding:NSUTF8StringEncoding];
 
-	return myString.cString;
+	return myString;
+}
+
+NSArray* commandsAsArray() {
+    if (commandList == nil) initializeCommandList();
+    return commandList.allKeys;
 }
 
 int ios_system(char* inputCmd) {
@@ -544,10 +659,12 @@ int ios_system(char* inputCmd) {
     char* str = command;
     while(*str) if (*str++ == ' ') ++numSpaces;
     char** argv = (char **)malloc(sizeof(char*) * (numSpaces + 2));
+    bool* dontExpand = malloc(sizeof(bool) * (numSpaces + 2));
     // n spaces = n+1 arguments, plus null at the end
     str = command;
     while (*str) {
         argv[argc] = str;
+        dontExpand[argc] = false;
         argc += 1;
         if (str[0] == '\'') { // argument begins with a quote.
             // everything until next quote is part of the argument
@@ -556,13 +673,14 @@ int ios_system(char* inputCmd) {
             if (!end) break;
             end[0] = 0x0;
             str = end + 1;
-        } if (str[0] == '\"') { // argument begins with a double quote.
+        } else if (str[0] == '\"') { // argument begins with a double quote.
             // everything until next double quote is part of the argument
             argv[argc-1] = str + 1;
             char* end = strstr(argv[argc-1], "\"");
             if (!end) break;
             end[0] = 0x0;
             str = end + 1;
+            dontExpand[argc-1] = true; // don't expand arguments in quotes
         } else {
             // skip to next space:
             char* end = strstr(str, " ");
@@ -574,18 +692,18 @@ int ios_system(char* inputCmd) {
         while (str && (str[0] == ' ')) str++; // skip multiple spaces
     }
     argv[argc] = NULL;
-    // So far, all arguments are pointers into originalCommand.
-    // We need to change them (environment variables expansion, ~ expansion, etc)
-    // Duplicate everything so we can realloc:
-    char** argv_copy = (char **)malloc(sizeof(char*) * (argc + 1));
-    for (int i = 0; i < argc; i++) argv_copy[i] = strdup(argv[i]);
-    argv_copy[argc] = NULL;
-    free(argv);
-    argv = argv_copy;
-    // We have the arguments. Parse them for environment variables, ~, etc.
-    for (int i = 1; i < argc; i++) argv[i] = parseArgument(argv[i]);
-    
     if (argc != 0) {
+        // So far, all arguments are pointers into originalCommand.
+        // We need to change them (environment variables expansion, ~ expansion, etc)
+        // Duplicate everything so we can realloc:
+        char** argv_copy = (char **)malloc(sizeof(char*) * (argc + 1));
+        for (int i = 0; i < argc; i++) argv_copy[i] = strdup(argv[i]);
+        argv_copy[argc] = NULL;
+        free(argv);
+        argv = argv_copy;
+        // We have the arguments. Parse them for environment variables, ~, etc.
+        for (int i = 1; i < argc; i++) if (!dontExpand[i]) argv[i] = parseArgument(argv[i], argv[0]);
+        free(dontExpand); 
         // Now call the actual command:
         // - is argv[0] a command that refers to a file? (either absolute path, or in $PATH)
         //   if so, does it exist, does it have +x bit set, does it have #! python or #! lua on the first line?
@@ -605,7 +723,7 @@ int ios_system(char* inputCmd) {
             if ([[NSFileManager defaultManager] fileExistsAtPath:commandName isDirectory:&isDir]  && (!isDir)) {
                 // File exists, is a file.
                 struct stat sb;
-                if ((stat(commandName.UTF8String, &sb) == 0 && (sb.st_mode & S_IXUSR))) {
+                if ((stat(commandName.UTF8String, &sb) == 0) && S_ISXXX(sb.st_mode)) {
                     // File exists, is executable, not a directory.
                     cmdIsAFile = true;
                 }
@@ -638,7 +756,7 @@ int ios_system(char* inputCmd) {
                     // isExecutableFileAtPath replies "NO" even if file has x-bit set.
                     // if (![[NSFileManager defaultManager]  isExecutableFileAtPath:cmdname]) continue;
                     struct stat sb;
-                    if (!(stat(locationName.UTF8String, &sb) == 0 && (sb.st_mode & S_IXUSR))) continue;
+                    if (!((stat(locationName.UTF8String, &sb) == 0) && S_ISXXX(sb.st_mode))) continue;
                     // File exists, is executable, not a directory.
                 } else
                     // if (cmdIsAFile) we are now ready to execute this file:
@@ -667,7 +785,7 @@ int ios_system(char* inputCmd) {
                         argc += 1;
                         argv = (char **)realloc(argv, sizeof(char*) * argc);
                         // Move everything one step up
-                        for (int i = argc; i >= 1; i--) argv[i] = argv[i-1];
+                        for (int i = argc; i >= 1; i--) { argv[i] = argv[i-1]; }
                         argv[1] = realloc(argv[1], strlen(locationName.UTF8String));
                         strcpy(argv[1], locationName.UTF8String);
                         argv[0] = strdup(scriptName); // this one is new
@@ -677,6 +795,9 @@ int ios_system(char* inputCmd) {
                 if (cmdIsAFile) break; // else keep going through the path elements.
             }
         }
+        // Because some commands change argv, keep a local copy for release.
+        char** argv_ref = (char **)malloc(sizeof(char*) * (argc + 1));
+        for (int i = 0; i < argc; i++) argv_ref[i] = argv[i];
         // fprintf(stderr, "Command after parsing: ");
         // for (int i = 0; i < argc; i++)
         //    fprintf(stderr, "[%s] ", argv[i]);
@@ -702,9 +823,10 @@ int ios_system(char* inputCmd) {
         } else {
             // TODO: this should also raise an exception, for python scripts
             fprintf(stderr, "%s: command not found\n", argv[0]);
-        }
-    }
-    for (int i = 0; i < argc; i++) free(argv[i]);
+        } // if (function)
+        for (int i = 0; i < argc; i++) free(argv_ref[i]);
+        free(argv_ref);
+    } // argc != 0
     free(argv);
     free(originalCommand); // releases cmd
     // Did we write anything?
