@@ -36,12 +36,8 @@
 		223496B01FD5FC71007ED1A9 /* ios_system.h in Headers */ = {isa = PBXBuildFile; fileRef = 223496AE1FD5FC71007ED1A9 /* ios_system.h */; settings = {ATTRIBUTES = (Public, ); }; };
 		223496B71FD5FC89007ED1A9 /* ios_system.m in Sources */ = {isa = PBXBuildFile; fileRef = 223496B61FD5FC89007ED1A9 /* ios_system.m */; };
 		2248DB092004A5F900F2944C /* glbl.c in Sources */ = {isa = PBXBuildFile; fileRef = 2248DB012004A5F800F2944C /* glbl.c */; };
-		2248DB0F2004A5F900F2944C /* re.c in Sources */ = {isa = PBXBuildFile; fileRef = 2248DB072004A5F900F2944C /* re.c */; };
-		2248DB182004C5DB00F2944C /* compile.c in Sources */ = {isa = PBXBuildFile; fileRef = 2248DB142004C5DB00F2944C /* compile.c */; };
 		2248DB2C2004F82700F2944C /* tran.c in Sources */ = {isa = PBXBuildFile; fileRef = 2248DB212004F82700F2944C /* tran.c */; };
 		2248DB2F2004F82700F2944C /* main.c in Sources */ = {isa = PBXBuildFile; fileRef = 2248DB242004F82700F2944C /* main.c */; };
-		2253BA182018AA8F0019CB39 /* fcntlmodule.c in Sources */ = {isa = PBXBuildFile; fileRef = 22C894CE1FDBF105006CDE47 /* fcntlmodule.c */; settings = {COMPILER_FLAGS = "-DNDEBUG -fno-strict-aliasing -fno-common -dynamic -g -fwrapv -O3 -Wall -Wstrict-prototypes -I ../python_ios/Python-2.7.13/Include/ -I ../python_ios -DPy_BUILD_CORE -I ../libssh2-for-iOS/include/"; }; };
-		2253BA192018AA960019CB39 /* config.c in Sources */ = {isa = PBXBuildFile; fileRef = 22C894AA1FDBF105006CDE47 /* config.c */; settings = {COMPILER_FLAGS = "-DNDEBUG -fno-strict-aliasing -fno-common -dynamic -g -fwrapv -O3 -Wall -Wstrict-prototypes -I ../python_ios/Python-2.7.13/Include/ -I ../python_ios -DPy_BUILD_CORE -I ../libssh2-for-iOS/include/"; }; };
 		22577E481FDB47A90050F312 /* err.c in Sources */ = {isa = PBXBuildFile; fileRef = 22577D451FDB47A90050F312 /* err.c */; settings = {COMPILER_FLAGS = "-DHAVE_CONFIG_H "; }; };
 		22577E491FDB47A90050F312 /* lafe_err.h in Headers */ = {isa = PBXBuildFile; fileRef = 22577D461FDB47A90050F312 /* lafe_err.h */; };
 		22577E4A1FDB47A90050F312 /* lafe_platform.h in Headers */ = {isa = PBXBuildFile; fileRef = 22577D471FDB47A90050F312 /* lafe_platform.h */; };
@@ -524,7 +520,7 @@
 		225782FC1FDBC9B40050F312 /* llex.c in Sources */ = {isa = PBXBuildFile; fileRef = 225782D71FDBC9B40050F312 /* llex.c */; settings = {COMPILER_FLAGS = "-D LUA_USE_IOS "; }; };
 		225F060B20163C2000466685 /* tee.c in Sources */ = {isa = PBXBuildFile; fileRef = 225F060A20163C2000466685 /* tee.c */; };
 		225F06102016751900466685 /* getopt_long.c in Sources */ = {isa = PBXBuildFile; fileRef = 225F060F2016751800466685 /* getopt_long.c */; };
-		225F061220171B4300466685 /* ssh_main.c in Sources */ = {isa = PBXBuildFile; fileRef = 225F061120171B4300466685 /* ssh_main.c */; settings = {COMPILER_FLAGS = "-F ../../../blink/Frameworks/"; }; };
+		225F061220171B4300466685 /* ssh_main.c in Sources */ = {isa = PBXBuildFile; fileRef = 225F061120171B4300466685 /* ssh_main.c */; settings = {COMPILER_FLAGS = "-F ../blink/Frameworks/"; }; };
 		226378741FDB3EE400AE8827 /* rmdir.c in Sources */ = {isa = PBXBuildFile; fileRef = 2263780C1FDB3EE100AE8827 /* rmdir.c */; };
 		226378751FDB3EE400AE8827 /* termcap.h in Headers */ = {isa = PBXBuildFile; fileRef = 2263780D1FDB3EE100AE8827 /* termcap.h */; };
 		226378771FDB3EE400AE8827 /* mv.c in Sources */ = {isa = PBXBuildFile; fileRef = 226378101FDB3EE100AE8827 /* mv.c */; };
@@ -565,6 +561,11 @@
 		226378B31FDB3EE400AE8827 /* futimens.c in Sources */ = {isa = PBXBuildFile; fileRef = 2263785B1FDB3EE300AE8827 /* futimens.c */; };
 		226378B71FDB3EE400AE8827 /* gzip.c in Sources */ = {isa = PBXBuildFile; fileRef = 2263785F1FDB3EE300AE8827 /* gzip.c */; };
 		226378C91FDB3EE400AE8827 /* chown.c in Sources */ = {isa = PBXBuildFile; fileRef = 226378721FDB3EE300AE8827 /* chown.c */; };
+		226B1E2D2019F9F600649474 /* compile.c in Sources */ = {isa = PBXBuildFile; fileRef = 2248DB142004C5DB00F2944C /* compile.c */; };
+		226B1E2E2019F9F600649474 /* main.c in Sources */ = {isa = PBXBuildFile; fileRef = 2248DB122004C5DB00F2944C /* main.c */; };
+		226B1E2F2019F9F600649474 /* misc.c in Sources */ = {isa = PBXBuildFile; fileRef = 2248DB112004C5DB00F2944C /* misc.c */; };
+		226B1E302019F9F600649474 /* process.c in Sources */ = {isa = PBXBuildFile; fileRef = 2248DB132004C5DB00F2944C /* process.c */; };
+		226B1E312019FAAF00649474 /* re.c in Sources */ = {isa = PBXBuildFile; fileRef = 2248DB072004A5F900F2944C /* re.c */; };
 		227053651FF944D200F249DE /* python.c in Sources */ = {isa = PBXBuildFile; fileRef = 227053641FF944D200F249DE /* python.c */; settings = {COMPILER_FLAGS = "-Wno-unused-result -Wsign-compare -Wunreachable-code -DNDEBUG -g -fwrapv -O3 -Wall -Wstrict-prototypes -std=c99 -Wextra -Wno-unused-result -Wno-unused-parameter -Wno-missing-field-initializers -I ../python3_ios/Python-3.6.4/Include/ -I ../python3_ios/Python-3.6.4 -DPy_BUILD_CORE "; }; };
 		227053681FF9451C00F249DE /* acceler.c in Sources */ = {isa = PBXBuildFile; fileRef = 227053671FF9451C00F249DE /* acceler.c */; settings = {COMPILER_FLAGS = "-Wno-unused-result -Wsign-compare -Wunreachable-code -DNDEBUG -g -fwrapv -O3 -Wall -Wstrict-prototypes -std=c99 -Wextra -Wno-unused-result -Wno-unused-parameter -Wno-missing-field-initializers -I ../python3_ios/Python-3.6.4/Include/ -I ../python3_ios/Python-3.6.4 -DPy_BUILD_CORE "; }; };
 		2270536A1FF9452D00F249DE /* grammar1.c in Sources */ = {isa = PBXBuildFile; fileRef = 227053691FF9452D00F249DE /* grammar1.c */; settings = {COMPILER_FLAGS = "-Wno-unused-result -Wsign-compare -Wunreachable-code -DNDEBUG -g -fwrapv -O3 -Wall -Wstrict-prototypes -std=c99 -Wextra -Wno-unused-result -Wno-unused-parameter -Wno-missing-field-initializers -I ../python3_ios/Python-3.6.4/Include/ -I ../python3_ios/Python-3.6.4 -DPy_BUILD_CORE "; }; };
@@ -831,14 +832,6 @@
 		22E922442010E03C000445A0 /* proctab.c in Sources */ = {isa = PBXBuildFile; fileRef = 2248DB232004F82700F2944C /* proctab.c */; };
 		22E922452010E03C000445A0 /* run.c in Sources */ = {isa = PBXBuildFile; fileRef = 2248DB1B2004F82600F2944C /* run.c */; };
 		22E922462010E03C000445A0 /* ytab.c in Sources */ = {isa = PBXBuildFile; fileRef = 2248DB1A2004F82600F2944C /* ytab.c */; };
-		22E922472010E0B5000445A0 /* main.c in Sources */ = {isa = PBXBuildFile; fileRef = 2248DB122004C5DB00F2944C /* main.c */; };
-		22E922482010E0B5000445A0 /* misc.c in Sources */ = {isa = PBXBuildFile; fileRef = 2248DB112004C5DB00F2944C /* misc.c */; };
-		22E922492010E0B5000445A0 /* process.c in Sources */ = {isa = PBXBuildFile; fileRef = 2248DB132004C5DB00F2944C /* process.c */; };
-		22D8DEBC20079E4C00FAADB7 /* cset.c in Sources */ = {isa = PBXBuildFile; fileRef = 22D8DEB820079E4C00FAADB7 /* cset.c */; };
-		22D8DEBD20079E4C00FAADB7 /* cmap.c in Sources */ = {isa = PBXBuildFile; fileRef = 22D8DEB920079E4C00FAADB7 /* cmap.c */; };
-		22D8DEBE20079E4C00FAADB7 /* tr.c in Sources */ = {isa = PBXBuildFile; fileRef = 22D8DEBA20079E4C00FAADB7 /* tr.c */; };
-		22D8DEBF20079E4C00FAADB7 /* str.c in Sources */ = {isa = PBXBuildFile; fileRef = 22D8DEBB20079E4C00FAADB7 /* str.c */; };
-		22EB965A20065366009E39D0 /* (null) in Frameworks */ = {isa = PBXBuildFile; };
 		22FE48C01FDC796D00899DA7 /* libluatex.dylib in Frameworks */ = {isa = PBXBuildFile; fileRef = 2219DFBC1FD739C900675252 /* libluatex.dylib */; };
 		22FE48C11FDC796D00899DA7 /* libpdftex.dylib in Frameworks */ = {isa = PBXBuildFile; fileRef = 2219DFBE1FD739C900675252 /* libpdftex.dylib */; };
 		22FE48C21FDC796D00899DA7 /* libtexlua52.5.dylib in Frameworks */ = {isa = PBXBuildFile; fileRef = 2219DFBD1FD739C900675252 /* libtexlua52.5.dylib */; };
@@ -3918,6 +3911,7 @@
 				2257822A1FDB4D390050F312 /* wildcard.c in Sources */,
 				225782061FDB4D390050F312 /* krb5_sspi.c in Sources */,
 				22577E981FDB47A90050F312 /* archive_write_set_compression_gzip.c in Sources */,
+				226B1E312019FAAF00649474 /* re.c in Sources */,
 				225782521FDB4D390050F312 /* tool_convert.c in Sources */,
 				22CF27A51FDB3FDB0087DDAD /* w.c in Sources */,
 				22AA34521FFA6FC60026DEFE /* _testcapimodule.c in Sources */,
@@ -3925,7 +3919,6 @@
 				22AA34321FF99F760026DEFE /* callproc.c in Sources */,
 				22AA341D1FF99DB50026DEFE /* convolute.c in Sources */,
 				22577E661FDB47A90050F312 /* archive_read_disk.c in Sources */,
-				22E922492010E0B5000445A0 /* process.c in Sources */,
 				22D8DEB6200791BB00FAADB7 /* echo.c in Sources */,
 				225782011FDB4D390050F312 /* cram.c in Sources */,
 				225782E71FDBC9B40050F312 /* lstate.c in Sources */,
@@ -3946,8 +3939,6 @@
 				22AA33EC1FF99AD60026DEFE /* pyexpat.c in Sources */,
 				227053701FF9454D00F249DE /* parser.c in Sources */,
 				22CF27CC1FDB43080087DDAD /* wc.c in Sources */,
-				22C8919C1FDBCF09006CDE47 /* frozen.c in Sources */,
-				22C8918D1FDBCF09006CDE47 /* dtoa.c in Sources */,
 				225782DF1FDBC9B40050F312 /* lbaselib.c in Sources */,
 				22AA33851FF9929E0026DEFE /* stringio.c in Sources */,
 				22AA341A1FF99DB50026DEFE /* numbertheory.c in Sources */,
@@ -3972,7 +3963,6 @@
 				227053721FF9455300F249DE /* bitset.c in Sources */,
 				22AA344F1FFA6F0C0026DEFE /* _ctypes_test.c in Sources */,
 				22577E901FDB47A90050F312 /* archive_write_disk_set_standard_lookup.c in Sources */,
-				2248DB2B2004F82700F2944C /* b.c in Sources */,
 				2263788C1FDB3EE400AE8827 /* print.c in Sources */,
 				22CF27C61FDB43080087DDAD /* util.c in Sources */,
 				225781D11FDB4D390050F312 /* sendf.c in Sources */,
@@ -3986,7 +3976,6 @@
 				225781B01FDB4D380050F312 /* mprintf.c in Sources */,
 				22CF27951FDB3FDB0087DDAD /* date.c in Sources */,
 				225782801FDB4D390050F312 /* tool_sleep.c in Sources */,
-				2248DB252004F82700F2944C /* ytab.c in Sources */,
 				225781631FDB4D380050F312 /* easy.c in Sources */,
 				22AA32D81FF94C7F0026DEFE /* memoryobject.c in Sources */,
 				22AA337F1FF992690026DEFE /* iobase.c in Sources */,
@@ -4050,6 +4039,7 @@
 				22AA33201FF9512E0026DEFE /* mystrtoul.c in Sources */,
 				22577E801FDB47A90050F312 /* archive_read_support_format_tar.c in Sources */,
 				225782FA1FDBC9B40050F312 /* ldblib.c in Sources */,
+				226B1E302019F9F600649474 /* process.c in Sources */,
 				227053741FF9455800F249DE /* metagrammar.c in Sources */,
 				225781E31FDB4D390050F312 /* speedcheck.c in Sources */,
 				225782F81FDBC9B40050F312 /* ltable.c in Sources */,
@@ -4102,6 +4092,7 @@
 				222DC35E1FFD4D880018583C /* connection.c in Sources */,
 				22AA335A1FF990A20026DEFE /* gcmodule.c in Sources */,
 				22AA33FD1FF99BCC0026DEFE /* _codecs_cn.c in Sources */,
+				226B1E2E2019F9F600649474 /* main.c in Sources */,
 				2257819A1FDB4D380050F312 /* ldap.c in Sources */,
 				22AA336B1FF991950026DEFE /* _collectionsmodule.c in Sources */,
 				222DC35F1FFD4D880018583C /* statement.c in Sources */,
@@ -4119,7 +4110,6 @@
 				22E9223A2010E02C000445A0 /* buf.c in Sources */,
 				22AA32E81FF94D4C0026DEFE /* sliceobject.c in Sources */,
 				22577E971FDB47A90050F312 /* archive_write_set_compression_compress.c in Sources */,
-				2253BA192018AA960019CB39 /* config.c in Sources */,
 				2257817B1FDB4D380050F312 /* hostcheck.c in Sources */,
 				22AA344D1FFA6DE20026DEFE /* hashtable.c in Sources */,
 				226378911FDB3EE400AE8827 /* cmp.c in Sources */,
@@ -4185,6 +4175,7 @@
 				2257820B1FDB4D390050F312 /* spnego_gssapi.c in Sources */,
 				226378961FDB3EE400AE8827 /* print.c in Sources */,
 				2257820F1FDB4D390050F312 /* version.c in Sources */,
+				226B1E2F2019F9F600649474 /* misc.c in Sources */,
 				22AA32D11FF94C340026DEFE /* listobject.c in Sources */,
 				22577E8E1FDB47A90050F312 /* archive_write_disk.c in Sources */,
 				22AA336D1FF991AC0026DEFE /* itertoolsmodule.c in Sources */,
@@ -4238,7 +4229,6 @@
 				225781EB1FDB4D390050F312 /* strdup.c in Sources */,
 				225782421FDB4D390050F312 /* tool_bname.c in Sources */,
 				222DC33E1FFB7FFE0018583C /* zlibmodule.c in Sources */,
-				22E922472010E0B5000445A0 /* main.c in Sources */,
 				22AA32EE1FF94D6D0026DEFE /* typeobject.c in Sources */,
 				22CF279C1FDB3FDB0087DDAD /* pwd.c in Sources */,
 				22AA344C1FFA6DC40026DEFE /* faulthandler.c in Sources */,
@@ -4378,7 +4368,6 @@
 				22577E891FDB47A90050F312 /* archive_windows.c in Sources */,
 				22AA33111FF950490026DEFE /* getcopyright.c in Sources */,
 				22AA32D61FF94C6C0026DEFE /* odictobject.c in Sources */,
-				22E922482010E0B5000445A0 /* misc.c in Sources */,
 				22AA33151FF950880026DEFE /* getversion.c in Sources */,
 				22AA33771FF992100026DEFE /* _localemodule.c in Sources */,
 				22AA32EA1FF94D530026DEFE /* structseq.c in Sources */,
@@ -4476,6 +4465,7 @@
 				225782601FDB4D390050F312 /* tool_help.c in Sources */,
 				223496B71FD5FC89007ED1A9 /* ios_system.m in Sources */,
 				22AA33081FF94FFC0026DEFE /* errors.c in Sources */,
+				226B1E2D2019F9F600649474 /* compile.c in Sources */,
 				225781AC1FDB4D380050F312 /* memdebug.c in Sources */,
 				225782E41FDBC9B40050F312 /* lcorolib.c in Sources */,
 				225782841FDB4D390050F312 /* tool_urlglob.c in Sources */,
