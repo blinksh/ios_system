@@ -236,6 +236,7 @@ static void main_free(struct GlobalConfig *config)
  * scp localFile user@host:~/path/       => curl -T localFile scp://user@host/~/path/localFile
  */
 #ifdef BLINKSHELL
+__attribute__ ((visibility("default")))
 int curl_static_main(int argc, char *argv[]);
 #else
 int curl_main(int argc, char *argv[]);

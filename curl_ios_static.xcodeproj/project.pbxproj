@@ -356,9 +356,26 @@
 		2219E2CB1FD7E58600675252 /* tool_writeout.h in Headers */ = {isa = PBXBuildFile; fileRef = 2219E2681FD7E58600675252 /* tool_writeout.h */; };
 		2219E2CC1FD7E58600675252 /* tool_xattr.c in Sources */ = {isa = PBXBuildFile; fileRef = 2219E2691FD7E58600675252 /* tool_xattr.c */; };
 		2219E2CD1FD7E58600675252 /* tool_xattr.h in Headers */ = {isa = PBXBuildFile; fileRef = 2219E26A1FD7E58600675252 /* tool_xattr.h */; };
-		D271F98725B5B7DF005F88E5 /* openssl.xcframework in Frameworks */ = {isa = PBXBuildFile; fileRef = D271F98525B5B7DF005F88E5 /* openssl.xcframework */; };
-		D271F98825B5B7DF005F88E5 /* libssh2.xcframework in Frameworks */ = {isa = PBXBuildFile; fileRef = D271F98625B5B7DF005F88E5 /* libssh2.xcframework */; };
+		D2D492BC25CD81E0007659F1 /* libssh2.xcframework in Frameworks */ = {isa = PBXBuildFile; fileRef = D2D492BB25CD81D0007659F1 /* libssh2.xcframework */; };
+		D2D492BD25CD81E0007659F1 /* libssh2.xcframework in Embed Frameworks */ = {isa = PBXBuildFile; fileRef = D2D492BB25CD81D0007659F1 /* libssh2.xcframework */; settings = {ATTRIBUTES = (CodeSignOnCopy, RemoveHeadersOnCopy, ); }; };
+		D2D492C025CD81EA007659F1 /* openssl.xcframework in Frameworks */ = {isa = PBXBuildFile; fileRef = D2D492BF25CD81EA007659F1 /* openssl.xcframework */; };
+		D2D492C125CD81EA007659F1 /* openssl.xcframework in Embed Frameworks */ = {isa = PBXBuildFile; fileRef = D2D492BF25CD81EA007659F1 /* openssl.xcframework */; settings = {ATTRIBUTES = (CodeSignOnCopy, RemoveHeadersOnCopy, ); }; };
 /* End PBXBuildFile section */
+
+/* Begin PBXCopyFilesBuildPhase section */
+		D2D492BE25CD81E0007659F1 /* Embed Frameworks */ = {
+			isa = PBXCopyFilesBuildPhase;
+			buildActionMask = 2147483647;
+			dstPath = "";
+			dstSubfolderSpec = 10;
+			files = (
+				D2D492C125CD81EA007659F1 /* openssl.xcframework in Embed Frameworks */,
+				D2D492BD25CD81E0007659F1 /* libssh2.xcframework in Embed Frameworks */,
+			);
+			name = "Embed Frameworks";
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXCopyFilesBuildPhase section */
 
 /* Begin PBXFileReference section */
 		2219DFCF1FD73AF500675252 /* curl_ios_static.framework */ = {isa = PBXFileReference; explicitFileType = wrapper.framework; includeInIndex = 0; path = curl_ios_static.framework; sourceTree = BUILT_PRODUCTS_DIR; };
@@ -715,6 +732,8 @@
 		2219E26A1FD7E58600675252 /* tool_xattr.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; path = tool_xattr.h; sourceTree = "<group>"; };
 		D271F98525B5B7DF005F88E5 /* openssl.xcframework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.xcframework; name = openssl.xcframework; path = xcfs/.build/artifacts/xcfs/openssl.xcframework; sourceTree = "<group>"; };
 		D271F98625B5B7DF005F88E5 /* libssh2.xcframework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.xcframework; name = libssh2.xcframework; path = xcfs/.build/artifacts/xcfs/libssh2.xcframework; sourceTree = "<group>"; };
+		D2D492BB25CD81D0007659F1 /* libssh2.xcframework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.xcframework; name = libssh2.xcframework; path = ../../xcfs/.build/artifacts/xcfs/libssh2.xcframework; sourceTree = "<group>"; };
+		D2D492BF25CD81EA007659F1 /* openssl.xcframework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.xcframework; name = openssl.xcframework; path = ../../xcfs/.build/artifacts/xcfs/openssl.xcframework; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -722,8 +741,8 @@
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
-				D271F98725B5B7DF005F88E5 /* openssl.xcframework in Frameworks */,
-				D271F98825B5B7DF005F88E5 /* libssh2.xcframework in Frameworks */,
+				D2D492C025CD81EA007659F1 /* openssl.xcframework in Frameworks */,
+				D2D492BC25CD81E0007659F1 /* libssh2.xcframework in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -1142,6 +1161,8 @@
 		2219E2D01FD7EDE600675252 /* Frameworks */ = {
 			isa = PBXGroup;
 			children = (
+				D2D492BF25CD81EA007659F1 /* openssl.xcframework */,
+				D2D492BB25CD81D0007659F1 /* libssh2.xcframework */,
 				D271F98625B5B7DF005F88E5 /* libssh2.xcframework */,
 				D271F98525B5B7DF005F88E5 /* openssl.xcframework */,
 			);
@@ -1339,6 +1360,7 @@
 				2219DFCB1FD73AF500675252 /* Frameworks */,
 				2219DFCC1FD73AF500675252 /* Headers */,
 				2219DFCD1FD73AF500675252 /* Resources */,
+				D2D492BE25CD81E0007659F1 /* Embed Frameworks */,
 			);
 			buildRules = (
 			);
@@ -1728,7 +1750,7 @@
 				SKIP_INSTALL = YES;
 				STRIP_INSTALLED_PRODUCT = NO;
 				STRIP_STYLE = "non-global";
-				TARGETED_DEVICE_FAMILY = "1,2";
+				TARGETED_DEVICE_FAMILY = "1,2,6";
 			};
 			name = Debug;
 		};
@@ -1769,7 +1791,7 @@
 				SKIP_INSTALL = YES;
 				STRIP_INSTALLED_PRODUCT = NO;
 				STRIP_STYLE = "non-global";
-				TARGETED_DEVICE_FAMILY = "1,2";
+				TARGETED_DEVICE_FAMILY = "1,2,6";
 			};
 			name = Release;
 		};
