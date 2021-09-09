@@ -29,8 +29,8 @@
 // If we have Blinkshell, we use their key management:
 #ifdef BLINKSHELL
 #import "BKDefaults.h"
-#import "BKHosts.h"
-#import "BKPubKey.h"
+#import <BlinkConfig/BKHosts.h>
+#import <BlinkConfig/BKPubKey.h>
 #endif
 
 #ifdef HAVE_LIMITS_H
@@ -848,7 +848,7 @@ static CURLcode ssh_statemach_act(struct connectdata *conn, bool *block)
                   // key associated with this hostname
                   if ((pk = [BKPubKey withID:[NSString stringWithUTF8String:data->set.str[STRING_SSH_PRIVATE_KEY]]]) != nil) {
                       publicKeyMemory = [pk.publicKey UTF8String];
-                      privateKeyMemory = [pk.privateKey UTF8String];
+                      privateKeyMemory = [[pk loadPrivateKey] UTF8String];
                       sshc->rsa = data->set.str[STRING_SSH_PRIVATE_KEY];
                   }
               }
@@ -857,7 +857,7 @@ static CURLcode ssh_statemach_act(struct connectdata *conn, bool *block)
                   if (host.key) {
                       if ((pk = [BKPubKey withID:host.key]) != nil) {
                           publicKeyMemory = [pk.publicKey UTF8String];
-                          privateKeyMemory = [pk.privateKey UTF8String];
+                          privateKeyMemory = [[pk loadPrivateKey] UTF8String];
                           sshc->rsa = strdup(host.key.UTF8String);
                       }
                   }
@@ -869,7 +869,7 @@ static CURLcode ssh_statemach_act(struct connectdata *conn, bool *block)
               // Priority 2: key named id_rsa:
               if ((pk = [BKPubKey withID:@"id_rsa"]) != nil) {
                 publicKeyMemory = [pk.publicKey UTF8String];
-                privateKeyMemory = [pk.privateKey UTF8String];
+                privateKeyMemory = [[pk loadPrivateKey] UTF8String];
                 sshc->rsa = strdup("id_rsa");
               }
             }
@@ -877,7 +877,7 @@ static CURLcode ssh_statemach_act(struct connectdata *conn, bool *block)
               // Still no luck, try with id_dsa:
               if ((pk = [BKPubKey withID:@"id_dsa"]) != nil) {
                 publicKeyMemory = [pk.publicKey UTF8String];
-                privateKeyMemory = [pk.privateKey UTF8String];
+                privateKeyMemory = [[pk loadPrivateKey] UTF8String];
                 sshc->rsa = strdup("id_dsa");
               }
             }
