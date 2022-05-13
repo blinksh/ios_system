@@ -289,14 +289,17 @@ typedef struct _functionParameters {
 } functionParameters;
 
 extern pthread_mutex_t pid_mtx;
+extern _Atomic(int) cleanup_counter;
 static void cleanup_function(void* parameters) {
     // This function is called when pthread_exit() or ios_kill() is called
     functionParameters *p = (functionParameters *) parameters;
     char* commandName = p->argv[0];
     NSLog(@"cleanup_function: %s thread_id %x pid: %d stdin %d stdout %d stderr %d isPipeOut %d", commandName, pthread_self(), ios_currentPid(), fileno(p->stdin), fileno(p->stdout), fileno(p->stderr), p->isPipeOut);
+    NSLog(@"currentSession->commandName: %s", currentSession->commandName);
     if ((strcmp(commandName, "less") == 0) || (strcmp(commandName, "more") == 0)) {
-        if ((strcmp(currentSession->commandName, "less") != 0) && (strcmp(currentSession->commandName, "more") != 0)) {
+        if ((strlen(currentSession->commandName) > 0) && (strcmp(currentSession->commandName, "less") != 0) && (strcmp(currentSession->commandName, "more") != 0)) {
             // Command was "root_command | sthg | less". We need to kill root command.
+            // If less itself started another command, then currentSession->commandName is "".
             // Unless less / more was started as a pager, in which case don't kill root command (e.g. for man).
             pthread_kill(currentSession->current_command_root_thread, SIGINT);
             while (fgetc(thread_stdin) != EOF) { } // flush input, otherwise previous command gets blocked.
@@ -371,13 +374,12 @@ static void cleanup_function(void* parameters) {
         }
     }
     // Some programs stop waiting as soon as stdout/stderr close (which makes sense)
-    if (isLastThread) {
-        NSLog(@"Locking for thread %x in cleanup_function\n", pthread_self());
-        pthread_mutex_lock(&pid_mtx); // Avoid multi-lock when several commands end together (for ls | grep)
-    }
+    cleanup_counter++;
+    while (pthread_mutex_trylock(&pid_mtx) != 0) { } // Someone else has the lock, so we wait.
+    pthread_mutex_unlock(&pid_mtx);
     if (mustCloseStderr) {
         NSLog(@"Closing stderr (mustCloseStderr): %d \n", fileno(p->stderr));
-        fclose(p->stderr);
+        int res = fclose(p->stderr);
     }
     bool mustCloseStdout = fileno(p->stdout) != fileno(stdout);
     if (!isSh) {
@@ -388,7 +390,7 @@ static void cleanup_function(void* parameters) {
     }
     if (mustCloseStdout) {
         NSLog(@"Closing stdout (mustCloseStdout): %d \n", fileno(p->stdout));
-        fclose(p->stdout);
+        int res = fclose(p->stdout);
     }
     if ((p->dlHandle != RTLD_SELF) && (p->dlHandle != RTLD_MAIN_ONLY)
         && (p->dlHandle != RTLD_DEFAULT) && (p->dlHandle != RTLD_NEXT))
@@ -407,9 +409,7 @@ static void cleanup_function(void* parameters) {
     if (currentSession->mainThreadId == pthread_self()) {
         currentSession->mainThreadId = 0;
     }
-    if (isLastThread) {
-        pthread_mutex_unlock(&pid_mtx);
-    }
+    cleanup_counter--;
 }
 
 // Avoir calling crash_handler several times:
@@ -429,8 +429,8 @@ void crash_handler(int sig) {
 
 static void* run_function(void* parameters) {
     functionParameters *p = (functionParameters *) parameters;
-    ios_storeThreadId(pthread_self());
     NSLog(@"Storing thread_id: %x pid: %d isPipeOut: %x isPipeErr: %x stdin %d stdout %d stderr %d command= %s\n", pthread_self(), ios_currentPid(), p->isPipeOut, p->isPipeErr, fileno(p->stdin), fileno(p->stdout), fileno(p->stderr), p->argv[0]);
+    ios_storeThreadId(pthread_self());
     // NSLog(@"Starting command: %s thread_id %x", p->argv[0], pthread_self());
     // re-initialize for getopt:
     // TODO: move to __thread variable for optind too
@@ -592,7 +592,7 @@ static char* parseArgument(char* argument, char* command) {
         
         NSRange  rSub = NSMakeRange(r1.location + r1.length, r2.location - r1.location - r1.length);
         NSString *variable_string = [argumentString substringWithRange:rSub];
-        const char* variable = getenv([variable_string UTF8String]);
+        const char* variable = ios_getenv([variable_string UTF8String]);
         if (variable) {
             // Okay, so this one exists.
             NSString* replacement_string = [NSString stringWithCString:variable encoding:NSUTF8StringEncoding];
@@ -847,10 +847,11 @@ void __cd_to_dir(NSString *newDir, NSFileManager *fileManager) {
   }
 }
 
-// For some Unix commands that call fchdir (including vim:
+// For some Unix commands that call fchdir (including vim):
 #undef fchdir
 int ios_fchdir(const int fd) {
     NSLog(@"Locking for thread %x in ios_fchdir\n", pthread_self());
+    while (cleanup_counter > 0) { } // Don't chdir while a command is ending.
     // We cannot have someone change the current directory while a command is starting or terminating.
     // hence the mutex_lock here.
     pthread_mutex_lock(&pid_mtx);
@@ -891,6 +892,38 @@ int ios_fchdir(const int fd) {
     return -1;
 }
 
+int ios_fchdir_nolock(const int fd) {
+    // Same function as fchdir, except it does not lock. To be called when resetting directory after fork().
+    while (cleanup_counter > 0) { } // Don't chdir while a command is ending.
+    int result = fchdir(fd);
+    if (result < 0) {
+        return result;
+    }
+    // We managed to change the directory. Update currentSession as well:
+    // Was that allowed?
+    // Allowed "cd" = below miniRoot *or* below localMiniRoot
+    NSFileManager *fileManager = [[NSFileManager alloc] init];
+    NSString* resultDir = [fileManager currentDirectoryPath];
+
+    if (__allowed_cd_to_path(resultDir)) {
+        strcpy(currentSession->previousDirectory, currentSession->currentDir);
+        strcpy(currentSession->currentDir, [resultDir UTF8String]);
+        errno = 0;
+        return 0;
+    }
+    
+    errno = EACCES; // Permission denied
+    // If the user tried to go above the miniRoot, set it to miniRoot
+    if ([miniRoot hasPrefix:resultDir]) {
+        [fileManager changeCurrentDirectoryPath:miniRoot];
+        strcpy(currentSession->currentDir, [miniRoot UTF8String]);
+        strcpy(currentSession->previousDirectory, currentSession->currentDir);
+    } else {
+        // go back to where we were before:
+        [fileManager changeCurrentDirectoryPath:[NSString stringWithCString:currentSession->currentDir encoding:NSUTF8StringEncoding]];
+    }
+    return -1;
+}
 
 int chdir_nolock(const char* path) {
     // Same function as chdir, except it does not lock. To be called from ios_releaseThread*()
@@ -939,6 +972,7 @@ int chdir_nolock(const char* path) {
 // For some Unix commands that call chdir:
 // Is also called at the end of the execution of each command
 int chdir(const char* path) {
+    while (cleanup_counter > 0) { } // Don't chdir while a command is ending.
     NSLog(@"Locking for thread %x in chdir, cd %s, stdin= %d\n", pthread_self(), path, fileno(thread_stdin));
     // We cannot have someone change the current directory while a command is starting or terminating.
     // hence the mutex_lock here.
@@ -1172,9 +1206,11 @@ static char* concatenateArgv(char* const argv[]) {
     // So we rely on ios_system to break them into chunks.
     while(argv[argc] != NULL) { cmdLength += strlen(argv[argc]) + 1; argc++;}
     if (argc == 0) return NULL; // safeguard check
-    char* cmd = malloc((cmdLength  + 3 * argc) * sizeof(char)); // space for quotes
+    char* cmd = malloc((cmdLength  + 3 * argc + 1) * sizeof(char)); // space for quotes
+    NSLog(@"Command allocated: %d ", cmdLength  + 3 * argc + 1);
     strcpy(cmd, argv[0]);
     argc = 1;
+    char recordSeparator = 0x1e;
     while (argv[argc] != NULL) {
         if (strstrquoted(argv[argc], " ")) {
             // argument contains spaces. Enclose it into quotes:
@@ -1192,13 +1228,22 @@ static char* concatenateArgv(char* const argv[]) {
                 strcat(cmd, "'");
                 argc++;
                 continue;
+            } else if (strchr(argv[argc], recordSeparator) == NULL) {
+                // Argument contains spaces and double and single quotes. We use recordSeparator to mark begin and end:
+                strcat(cmd, " ");
+                strncat(cmd, &recordSeparator, 1);
+                strcat(cmd, argv[argc]);
+                strncat(cmd, &recordSeparator, 1);
+                argc++;
+                continue;
             }
-            // Argument contains spaces and double and single quotes. We just concatenate and hope for the best:
+            NSLog(@"Argument contains spaces, double quotes, single quotes and recordSeparator");
         }
         strcat(cmd, " ");
         strcat(cmd, argv[argc]);
         argc++;
     }
+    NSLog(@"Command length: %d ", strlen(cmd));
     return cmd;
 }
 
@@ -1519,12 +1564,17 @@ int sh_main(int argc, char** argv) {
     // Anything after "sh" that contains an equal sign must be an environment variable. Pass it to ios_setenv.
     while (command[0] != NULL) {
         char* position = strstrquoted(command[0],"=");
-        char* firstSpace = strstrquoted(command[0]," ");
         if (position == NULL) { break; }
+        char* firstSpace = strstrquoted(command[0]," ");
         if (firstSpace < position) { break; }
+        firstSpace = strstrquoted(position," ");
+        if (firstSpace != NULL) { *firstSpace = 0; }
         *position = 0;
         ios_setenv(command[0], position+1, 1);
-        command++;
+        if (firstSpace != NULL) {
+            command[0] = firstSpace + 1;
+        }
+        else { command++; }
     }
     if (command[0] == NULL) {
         argv[0][0] = 'h'; // prevent termination in cleanup_function
@@ -1537,7 +1587,7 @@ int sh_main(int argc, char** argv) {
         NSLog(@"prevent termination in cleanup_function");
         argv[0][0] = 'h'; // prevent termination in cleanup_function
     }
-    // If there is a single command (no && or ||), no need to create a new session. I think. Let's try:
+    // If there is a single command (no && or ||), no need to create a new session.
     int i = 0;
     while ((command[i] != NULL) && (strstrquoted(command[i], "&&") == NULL) && (strstrquoted(command[i], "||") == NULL)) i++;
     if (command[i] == NULL) {
@@ -2024,6 +2074,7 @@ static char* getLastCharacterOfArgument(const char* argument) {
     // Problem: perl -e 'install([ from_to => {@ARGV}, verbose => '\''0'\'', uninstall_shadows => '\''0'\'', dir_mode => '\''755'\'' ]);'
     // Should become: "perl", "-e", "install([ from_to => {@ARGV}, verbose => '0', uninstall_shadows => '0', dir_mode => '755' ]);"
     // If there is no space after the end quote, keep concatenating the argument.
+    char recordSeparator = 0x1e;
     if (strlen(argument) == 0) return NULL; // be safe
     if (argument[0] == '"') {
         char* endquote = nextUnescapedCharacter(argument + 1, '"');
@@ -2064,6 +2115,9 @@ static char* getLastCharacterOfArgument(const char* argument) {
             return endquote + 1;
         }
         return NULL;
+    } else if (argument[0] == recordSeparator) {
+        char* endquote = strchr(argument + 1, recordSeparator);
+        return endquote + 1;
     }
     // TODO: the last character of the argument could also be '<' or '>' (vim does that, with no space after file name)
     else return nextUnescapedCharacter(argument + 1, ' ');
@@ -2079,6 +2133,13 @@ static char* unquoteArgument(char* argument) {
     }
     if (argument[0] == '\'') {
         if (argument[strlen(argument) - 1] == '\'') {
+            argument[strlen(argument) - 1] = 0x0;
+            return argument + 1;
+        }
+    }
+    char recordSeparator = 0x1e;
+    if (argument[0] == recordSeparator) {
+        if (argument[strlen(argument) - 1] == recordSeparator) {
             argument[strlen(argument) - 1] = 0x0;
             return argument + 1;
         }
@@ -2183,6 +2244,21 @@ int ios_system(const char* inputCmd) {
         }
     } else command = cmd;
     // fprintf(thread_stderr, "Command sent: %s \n", command);
+    // Environment variables before alias expansion:
+    char* commandForParsing = strdup(command);
+    char* commandForParsingFree = commandForParsing;
+    char* firstSpace = strstrquoted(commandForParsing, " ");
+    while (firstSpace != NULL) {
+        *firstSpace = 0;
+        char* equalSign = strchr(commandForParsing, '=');
+        if (equalSign == NULL) break;
+        *equalSign = 0;
+        ios_setenv(commandForParsing, equalSign+1, 1);
+        command += (firstSpace - commandForParsing) + 1;
+        commandForParsing = firstSpace + 1;
+        firstSpace = strstrquoted(commandForParsing, " ");
+    }
+    free(commandForParsingFree);
     // alias expansion *before* input, output and error redirection.
     if ((command[0] != '\\') && (aliasDictionary != nil)) {
         // \command = cancel aliasing, get the original command
@@ -2273,185 +2349,190 @@ int ios_system(const char* inputCmd) {
     child_stdin = child_stdout = child_stderr = NULL;
     params->argc = 0; params->argv = 0; params->argv_ref = 0;
     params->function = NULL; params->isPipeOut = false; params->isPipeErr = false;
-    // scan until first "<" (input file)
-    inputFileMarker = strstrquoted(inputFileMarker, "<");
-    // scan until first non-space character:
-    if (inputFileMarker) {
-        inputFileName = inputFileMarker + 1; // skip past '<'
-        // skip past all spaces
-        while ((inputFileName[0] == ' ') && strlen(inputFileName) > 0) inputFileName++;
-    }
-    // is there a pipe ("|", "&|" or "|&")
-    // We assume here a logical command order: < before pipe, pipe before >.
-    // TODO: check what happens for unlogical commands. Refuse them, but gently.
-    // TODO: implement tee, because that has been removed
-    char* pipeMarker = strstrquoted(outputFileMarker,"&|");
-    if (!pipeMarker) pipeMarker = strstrquoted(outputFileMarker,"|&"); // both seem to work
-    if (pipeMarker) {
-        bool pushMainThread = currentSession->isMainThread;
-        currentSession->isMainThread = false;
-        if (params->stdout != 0) thread_stdout = params->stdout;
-        if (params->stderr != 0) thread_stderr = params->stderr;
-        // if popen fails, don't start the command
-        params->stdout = ios_popen(pipeMarker+2, "w");
-        params->stderr = params->stdout;
-        currentSession->isMainThread = pushMainThread;
-        pipeMarker[0] = 0x0;
-        sharedErrorOutput = true;
-        if (params->stdout == NULL) { // pipe open failed, return before we start a command
-            NSLog(@"Failed launching pipe for %s\n", pipeMarker+2);
-            ios_storeThreadId(0);
-            free(params);
-            free(originalCommand); // releases cmd, which was a strdup of inputCommand
-            return currentSession->global_errno;
+    // Only scan for input / output if there is no argument marker
+    char recordSeparator = 0x1e;
+    char* recordSeparatorPosition = strchr(inputFileMarker, recordSeparator);
+    if (recordSeparatorPosition == NULL) {
+        // scan until first "<" (input file)
+        inputFileMarker = strstrquoted(inputFileMarker, "<");
+        // scan until first non-space character:
+        if (inputFileMarker) {
+            inputFileName = inputFileMarker + 1; // skip past '<'
+            // skip past all spaces
+            while ((inputFileName[0] == ' ') && strlen(inputFileName) > 0) inputFileName++;
         }
-    } else {
-        pipeMarker = strstrquoted(outputFileMarker,"|");
+        // is there a pipe ("|", "&|" or "|&")
+        // We assume here a logical command order: < before pipe, pipe before >.
+        // TODO: check what happens for unlogical commands. Refuse them, but gently.
+        // TODO: implement tee, because that has been removed
+        char* pipeMarker = strstrquoted(outputFileMarker,"&|");
+        if (!pipeMarker) pipeMarker = strstrquoted(outputFileMarker,"|&"); // both seem to work
         if (pipeMarker) {
             bool pushMainThread = currentSession->isMainThread;
             currentSession->isMainThread = false;
             if (params->stdout != 0) thread_stdout = params->stdout;
-            if (params->stderr != 0) thread_stderr = params->stderr; // ?????
+            if (params->stderr != 0) thread_stderr = params->stderr;
             // if popen fails, don't start the command
-            params->stdout = ios_popen(pipeMarker+1, "w");
+            params->stdout = ios_popen(pipeMarker+2, "w");
+            params->stderr = params->stdout;
             currentSession->isMainThread = pushMainThread;
             pipeMarker[0] = 0x0;
+            sharedErrorOutput = true;
             if (params->stdout == NULL) { // pipe open failed, return before we start a command
-                NSLog(@"Failed launching pipe for %s\n", pipeMarker+1);
+                NSLog(@"Failed launching pipe for %s\n", pipeMarker+2);
                 ios_storeThreadId(0);
                 free(params);
                 free(originalCommand); // releases cmd, which was a strdup of inputCommand
                 return currentSession->global_errno;
             }
-        }
-    }
-    // We have removed the pipe part. Still need to parse the rest of the command
-    // Must scan in strstr by reverse order of inclusion. So "2>&1" before "2>" before ">"
-    errorFileMarker = strstrquoted(outputFileMarker,"&>"); // both stderr/stdout sent to same file
-    // output file name will be after "&>"
-    if (errorFileMarker) { outputFileName = errorFileMarker + 2; outputFileMarker = errorFileMarker; }
-    if (!errorFileMarker) {
-        // TODO: 2>&1 before > means redirect stderr to (current) stdout, then redirects stdout
-        // ...except with a pipe.
-        // Currently, we don't check for that.
-        errorFileMarker = strstrquoted(outputFileMarker,"2>&1"); // both stderr/stdout sent to same file
-        if (errorFileMarker) {
-            outputFileName = NULL;
-            if (params->stdout) params->stderr = params->stdout;
-            outputFileMarker = strstrquoted(outputFileMarker, ">");
-            if (outputFileMarker - errorFileMarker == 1) // the first '>' was the one from '2>&1'
-                outputFileMarker = strstrquoted(outputFileMarker + 2, ">"); // is there one after that?
-            if (outputFileMarker)
-                outputFileName = outputFileMarker + 1; // skip past '>'
-        }
-    }
-    if (errorFileMarker) { sharedErrorOutput = true; }
-    else {
-        // specific name for error file?
-        errorFileMarker = strstrquoted(outputFileMarker,"2>");
-        if (errorFileMarker) {
-            errorFileName = errorFileMarker + 2; // skip past "2>"
-            // skip past all spaces:
-            while ((errorFileName[0] == ' ') && strlen(errorFileName) > 0) errorFileName++;
-        }
-    }
-    // scan until first ">"
-    bool appendToFileName = false;
-    if (!sharedErrorOutput) {
-        // output and append.
-        outputFileMarker = strstrquoted(outputFileMarker, ">");
-        if (outputFileMarker) {
-            if ((strlen(outputFileMarker) > 1) && (outputFileMarker[1] == '>')) { // >>
-                outputFileName = outputFileMarker + 2; // skip past ">>"
-                appendToFileName = true;
-            } else {
-                outputFileName = outputFileMarker + 1; // skip past '>'
-            }
-        }
-    } else {
-        if (outputFileName == NULL)
-            outputFileMarker = NULL;
-    }
-    if (outputFileName) {
-        while ((outputFileName[0] == ' ') && strlen(outputFileName) > 0) outputFileName++;
-    }
-    if (errorFileName && (outputFileName == errorFileName)) {
-        // we got the same ">" twice, pick the next one ("2>" was before ">")
-        outputFileMarker = errorFileName;
-        outputFileMarker = strstrquoted(outputFileMarker, ">");
-        if (outputFileMarker) {
-            if ((strlen(outputFileMarker) > 1) && (outputFileMarker[1] == '>')) { // >>
-                outputFileName = outputFileMarker + 2; // skip past ">>"
-                appendToFileName = true;
-            } else {
-                outputFileName = outputFileMarker + 1; // skip past '>'
-            }
-            while ((outputFileName[0] == ' ') && strlen(outputFileName) > 0) outputFileName++;
-        } else outputFileName = NULL; // Only "2>", but no ">". It happens.
-    }
-    if (outputFileName) {
-        char* endFile = getLastCharacterOfArgument(outputFileName);
-        if (endFile) endFile[0] = 0x00; // end output file name at first space
-        assert(endFile <= maxPointer);
-    }
-    if (inputFileName) {
-        char* endFile = getLastCharacterOfArgument(inputFileName);
-        if (endFile) endFile[0] = 0x00; // end input file name at first space
-        assert(endFile <= maxPointer);
-    }
-    if (errorFileName) {
-        char* endFile = getLastCharacterOfArgument(errorFileName);
-        if (endFile) endFile[0] = 0x00; // end error file name at first space
-        assert(endFile <= maxPointer);
-    }
-    // insert chain termination elements at the beginning of each filename.
-    // Must be done after the parsing.
-    if (inputFileMarker) inputFileMarker[0] = 0x0;
-    // There was a test " && (params->stdout == NULL)" below. Why?
-    if (outputFileMarker) outputFileMarker[0] = 0x0; // There
-    if (errorFileMarker) errorFileMarker[0] = 0x0;
-    // strip filenames of quotes, if any:
-    if (outputFileName) outputFileName = unquoteArgument(outputFileName);
-    if (inputFileName) inputFileName = unquoteArgument(inputFileName);
-    if (errorFileName) errorFileName = unquoteArgument(errorFileName);
-    //
-    FILE* newStream;
-    if (inputFileName) {
-        newStream = fopen(inputFileName, "r");
-        if (newStream) params->stdin = newStream;
-    }
-    if (params->stdin == NULL) params->stdin = thread_stdin;
-    if (outputFileName) {
-        if (appendToFileName) {
-            newStream = fopen(outputFileName, "a"); // append
         } else {
-            newStream = fopen(outputFileName, "w");
-        }
-        if (newStream) {
-            if (params->stdout != NULL) {
-                if (fileno(params->stdout) != fileno(currentSession->stdout)) fclose(params->stdout);
+            pipeMarker = strstrquoted(outputFileMarker,"|");
+            if (pipeMarker) {
+                bool pushMainThread = currentSession->isMainThread;
+                currentSession->isMainThread = false;
+                if (params->stdout != 0) thread_stdout = params->stdout;
+                if (params->stderr != 0) thread_stderr = params->stderr; // ?????
+                // if popen fails, don't start the command
+                params->stdout = ios_popen(pipeMarker+1, "w");
+                currentSession->isMainThread = pushMainThread;
+                pipeMarker[0] = 0x0;
+                if (params->stdout == NULL) { // pipe open failed, return before we start a command
+                    NSLog(@"Failed launching pipe for %s\n", pipeMarker+1);
+                    ios_storeThreadId(0);
+                    free(params);
+                    free(originalCommand); // releases cmd, which was a strdup of inputCommand
+                    return currentSession->global_errno;
+                }
             }
-            params->stdout = newStream; 
         }
-    }
-    if (params->stdout == NULL) params->stdout = thread_stdout;
-    if (sharedErrorOutput && (params->stderr != params->stdout)) {
-        if (params->stderr != NULL) {
-            if (fileno(params->stderr) != fileno(currentSession->stderr)) fclose(params->stderr);
+        // We have removed the pipe part. Still need to parse the rest of the command
+        // Must scan in strstr by reverse order of inclusion. So "2>&1" before "2>" before ">"
+        errorFileMarker = strstrquoted(outputFileMarker,"&>"); // both stderr/stdout sent to same file
+        // output file name will be after "&>"
+        if (errorFileMarker) { outputFileName = errorFileMarker + 2; outputFileMarker = errorFileMarker; }
+        if (!errorFileMarker) {
+            // TODO: 2>&1 before > means redirect stderr to (current) stdout, then redirects stdout
+            // ...except with a pipe.
+            // Currently, we don't check for that.
+            errorFileMarker = strstrquoted(outputFileMarker,"2>&1"); // both stderr/stdout sent to same file
+            if (errorFileMarker) {
+                outputFileName = NULL;
+                if (params->stdout) params->stderr = params->stdout;
+                outputFileMarker = strstrquoted(outputFileMarker, ">");
+                if (outputFileMarker - errorFileMarker == 1) // the first '>' was the one from '2>&1'
+                    outputFileMarker = strstrquoted(outputFileMarker + 2, ">"); // is there one after that?
+                if (outputFileMarker)
+                    outputFileName = outputFileMarker + 1; // skip past '>'
+            }
         }
-        params->stderr = params->stdout;
-    }
-    else if (errorFileName) {
-        newStream = NULL;
-        newStream = fopen(errorFileName, "w");
-        if (newStream) {
+        if (errorFileMarker) { sharedErrorOutput = true; }
+        else {
+            // specific name for error file?
+            errorFileMarker = strstrquoted(outputFileMarker,"2>");
+            if (errorFileMarker) {
+                errorFileName = errorFileMarker + 2; // skip past "2>"
+                // skip past all spaces:
+                while ((errorFileName[0] == ' ') && strlen(errorFileName) > 0) errorFileName++;
+            }
+        }
+        // scan until first ">"
+        bool appendToFileName = false;
+        if (!sharedErrorOutput) {
+            // output and append.
+            outputFileMarker = strstrquoted(outputFileMarker, ">");
+            if (outputFileMarker) {
+                if ((strlen(outputFileMarker) > 1) && (outputFileMarker[1] == '>')) { // >>
+                    outputFileName = outputFileMarker + 2; // skip past ">>"
+                    appendToFileName = true;
+                } else {
+                    outputFileName = outputFileMarker + 1; // skip past '>'
+                }
+            }
+        } else {
+            if (outputFileName == NULL)
+                outputFileMarker = NULL;
+        }
+        if (outputFileName) {
+            while ((outputFileName[0] == ' ') && strlen(outputFileName) > 0) outputFileName++;
+        }
+        if (errorFileName && (outputFileName == errorFileName)) {
+            // we got the same ">" twice, pick the next one ("2>" was before ">")
+            outputFileMarker = errorFileName;
+            outputFileMarker = strstrquoted(outputFileMarker, ">");
+            if (outputFileMarker) {
+                if ((strlen(outputFileMarker) > 1) && (outputFileMarker[1] == '>')) { // >>
+                    outputFileName = outputFileMarker + 2; // skip past ">>"
+                    appendToFileName = true;
+                } else {
+                    outputFileName = outputFileMarker + 1; // skip past '>'
+                }
+                while ((outputFileName[0] == ' ') && strlen(outputFileName) > 0) outputFileName++;
+            } else outputFileName = NULL; // Only "2>", but no ">". It happens.
+        }
+        if (outputFileName) {
+            char* endFile = getLastCharacterOfArgument(outputFileName);
+            if (endFile) endFile[0] = 0x00; // end output file name at first space
+            assert(endFile <= maxPointer);
+        }
+        if (inputFileName) {
+            char* endFile = getLastCharacterOfArgument(inputFileName);
+            if (endFile) endFile[0] = 0x00; // end input file name at first space
+            assert(endFile <= maxPointer);
+        }
+        if (errorFileName) {
+            char* endFile = getLastCharacterOfArgument(errorFileName);
+            if (endFile) endFile[0] = 0x00; // end error file name at first space
+            assert(endFile <= maxPointer);
+        }
+        // insert chain termination elements at the beginning of each filename.
+        // Must be done after the parsing.
+        if (inputFileMarker) inputFileMarker[0] = 0x0;
+        // There was a test " && (params->stdout == NULL)" below. Why?
+        if (outputFileMarker) outputFileMarker[0] = 0x0; // There
+        if (errorFileMarker) errorFileMarker[0] = 0x0;
+        // strip filenames of quotes, if any:
+        if (outputFileName) outputFileName = unquoteArgument(outputFileName);
+        if (inputFileName) inputFileName = unquoteArgument(inputFileName);
+        if (errorFileName) errorFileName = unquoteArgument(errorFileName);
+        //
+        FILE* newStream;
+        if (inputFileName) {
+            newStream = fopen(inputFileName, "r");
+            if (newStream) params->stdin = newStream;
+        }
+        if (params->stdin == NULL) params->stdin = thread_stdin;
+        if (outputFileName) {
+            if (appendToFileName) {
+                newStream = fopen(outputFileName, "a"); // append
+            } else {
+                newStream = fopen(outputFileName, "w");
+            }
+            if (newStream) {
+                if (params->stdout != NULL) {
+                    if (fileno(params->stdout) != fileno(currentSession->stdout)) fclose(params->stdout);
+                }
+                params->stdout = newStream;
+            }
+        }
+        if (params->stdout == NULL) params->stdout = thread_stdout;
+        if (sharedErrorOutput && (params->stderr != params->stdout)) {
             if (params->stderr != NULL) {
                 if (fileno(params->stderr) != fileno(currentSession->stderr)) fclose(params->stderr);
             }
-            params->stderr = newStream;
+            params->stderr = params->stdout;
         }
-    }
-    if (params->stderr == NULL) params->stderr = thread_stderr;
+        else if (errorFileName) {
+            newStream = NULL;
+            newStream = fopen(errorFileName, "w");
+            if (newStream) {
+                if (params->stderr != NULL) {
+                    if (fileno(params->stderr) != fileno(currentSession->stderr)) fclose(params->stderr);
+                }
+                params->stderr = newStream;
+            }
+        }
+        if (params->stderr == NULL) params->stderr = thread_stderr;
+    } // recordSeparator != NULL
     int argc = 0;
     size_t numSpaces = 0;
     // the number of arguments is *at most* the number of spaces plus one
@@ -2468,7 +2549,7 @@ int ios_system(const char* inputCmd) {
         char* end = getLastCharacterOfArgument(str);
         bool mustBreak = (end == NULL) || (strlen(end) == 0);
         if (!mustBreak) end[0] = 0x0;
-        if ((str[0] == '\'') || (str[0] == '"')) {
+        if ((str[0] == '\'') || (str[0] == '"') || (str[0] == recordSeparator)) {
             dontExpand[argc-1] = true; // don't expand arguments in quotes
         }
         argv[argc-1] = unquoteArgument(argv[argc-1]);
@@ -2726,12 +2807,10 @@ int ios_system(const char* inputCmd) {
         NSString* commandName = [NSString stringWithCString:argv[0] encoding:NSUTF8StringEncoding];
         // hasPrefix covers python, python3, python3.9.
         if ([commandName hasPrefix: @"python"]) {
-            // Tell Python that we are running Python3.
-            setenv("PYTHONEXECUTABLE", "python3", 1);
             // Ability to start multiple python3 scripts (required for Jupyter notebooks):
             // start by increasing the number of the interpreter, until we're out.
             int numInterpreter = 0;
-            if (currentPythonInterpreter < numPythonInterpreters) {
+            if ((currentPythonInterpreter < numPythonInterpreters) && (!PythonIsRunning[currentPythonInterpreter])) {
                 numInterpreter = currentPythonInterpreter;
                 currentPythonInterpreter++;
             } else {
@@ -2743,6 +2822,8 @@ int ios_system(const char* inputCmd) {
                     display_alert(@"Too many Python scripts", @"There are too many Python interpreters running at the same time. Try closing some of them.");
                     NSLog(@"%@", @"Too many python scripts running simultaneously. Try closing some notebooks.\n");
                     commandName = @"notAValidCommand";
+                } else {
+                    currentPythonInterpreter = numInterpreter;
                 }
             }
             if ((numInterpreter == 0) && (strlen(argv[0]) > 7)) {
@@ -2984,6 +3065,7 @@ NSString * pathNormalize(NSString *path) {
   NSString * result = [pathNormalizeArray([path pathComponents], !isAbsolute) componentsJoinedByString: @"/"];
   
   if (!result.length && !isAbsolute) {
+      // Same function as chdir, except it does not lock. To be called from ios_releaseThread*()
     result = @".";
   }
   
@@ -3015,4 +3097,52 @@ NSString * pathJoin(NSString * segmentA, NSString * segmentB) {
   }
   
   return pathNormalize(path);
+}
+
+//
+char* ios_getPythonLibraryName() {
+    // Ability to start multiple python3 scripts, expanded for commands that start python3 as a dynamic library.
+    // (mostly vim, right now)
+    // start by increasing the number of the interpreter, until we're out.
+    int numInterpreter = 0;
+    if ((currentPythonInterpreter < numPythonInterpreters) && (!PythonIsRunning[currentPythonInterpreter])) {
+        numInterpreter = currentPythonInterpreter;
+        currentPythonInterpreter++;
+    } else {
+        while  (numInterpreter < numPythonInterpreters) {
+            if (PythonIsRunning[numInterpreter] == false) break;
+            numInterpreter++;
+        }
+        if (numInterpreter >= numPythonInterpreters) {
+            // NSLog(@"ios_getPythonLibraryName: returning NULL\n");
+            return NULL;
+        } else {
+            currentPythonInterpreter = numInterpreter;
+        }
+    }
+    char* libraryName = NULL;
+    if ((numInterpreter >= 0) && (numInterpreter < numPythonInterpreters)) {
+        PythonIsRunning[numInterpreter] = true;
+        if (numInterpreter > 0) {
+            libraryName = strdup("pythonA");
+            libraryName[6] = 'A' + (numInterpreter - 1);
+        } else {
+            libraryName = strdup("python3_ios");
+        }
+        // NSLog(@"ios_getPythonLibraryName: returning %s\n", libraryName);
+        return libraryName;
+    }
+    // NSLog(@"ios_getPythonLibraryName: returning NULL\n");
+    return NULL;
+}
+
+void ios_releasePythonLibraryName(char* name) {
+    char libNumber = name[6];
+    if (libNumber == '3') PythonIsRunning[0] = false;
+    else {
+        libNumber -= 'A' - 1;
+        if ((libNumber > 0) && (libNumber < MaxPythonInterpreters))
+            PythonIsRunning[libNumber] = false;
+    }
+    free(name);
 }
