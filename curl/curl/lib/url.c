@@ -122,7 +122,7 @@ bool curl_win32_idn_to_ascii(const char *in, char **out);
 
 // If we have Blinkshell, we use their key management:
 #ifdef BLINKSHELL
-#import "BKDefaults.h"
+#import "BLKDefaults.h"
 #import <BlinkConfig/BKHosts.h>
 #endif
 
