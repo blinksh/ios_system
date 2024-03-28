@@ -13,6 +13,7 @@
 #include <string.h>
 #include <sys/wait.h>
 #include <sys/param.h>
+#include <dlfcn.h>  // for dlopen()/dlsym()/dlclose()
 
 #include "ios_error.h"
 #undef write
@@ -21,10 +22,45 @@
 #undef fputs
 #undef fputc
 #undef putw
+#undef putp
 #undef fflush
 #undef getenv
 #undef setenv
 #undef unsetenv
+
+// in order to run webAssembly commands sequentially, we first stack them, then run them in command line order:
+// At this point, this could just be a mutex.
+
+int preparingWebAssemblyCommands = 0;
+int orderOfWebAssemblyCommands = 0;
+void startedPreparingWebAssemblyCommand(void) {
+    preparingWebAssemblyCommands += 1;
+    orderOfWebAssemblyCommands += 1;
+}
+
+int webAssemblyCommandOrder(void) {
+    return orderOfWebAssemblyCommands;
+}
+
+void finishedPreparingWebAssemblyCommand(void) {
+    if (preparingWebAssemblyCommands > 0)
+        preparingWebAssemblyCommands -= 1;
+}
+
+static void executeWebAssemblyCommandsInOrder(void) {
+    void (*function)(void) = NULL;
+    function = dlsym(RTLD_MAIN_ONLY, "executeWebAssemblyCommands");
+    if (function != NULL) {
+        while (preparingWebAssemblyCommands > 0) {
+            // Empty loops create problems in Release mode.
+            if (thread_stdout != NULL) { fflush(thread_stdout); }
+            if (thread_stderr != NULL) { fflush(thread_stderr); }
+        }
+        function();
+    }
+    orderOfWebAssemblyCommands = 0;
+}
+
 
 int printf (const char *format, ...) {
     va_list arg;
@@ -46,7 +82,7 @@ int fprintf(FILE * restrict stream, const char * restrict format, ...) {
     if (fileno(stream) == STDOUT_FILENO) done = vfprintf (thread_stdout, format, arg);
     else if (fileno(stream) == STDERR_FILENO) done = vfprintf (thread_stderr, format, arg);
     // iOS, debug:
-    // else if (fileno(stream) == STDERR_FILENO) done = vfprintf (stderr, format, arg);
+    // else if ((fileno(stream) == STDERR_FILENO) || (fileno(stream) == fileno(thread_stderr))) done = vfprintf (stderr, format, arg);
     else done = vfprintf (stream, format, arg);
     va_end (arg);
     
@@ -151,6 +187,7 @@ void makeLocal(void) {
 
 inline pthread_t ios_getThreadId(pid_t pid) {
     // return ios_getLastThreadId(); // previous behaviour
+    if (pid >= IOS_MAX_THREADS) { return -1; }
     return thread_ids[pid];
 }
 
@@ -161,7 +198,7 @@ void newPreviousDirectory(void) {
 
 // We do not recycle process ids too quickly to avoid collisions.
 void storeEnvironment(char* envp[]);
-static inline const pid_t ios_nextAvailablePid() {
+static inline const pid_t ios_nextAvailablePid(void) {
     while (cleanup_counter > 0) { } // Don't start a command while another is ending.
     // fprintf(stderr, "Locking in ios_nextAvailablePid\n");
     pthread_mutex_lock(&pid_mtx);
@@ -214,7 +251,7 @@ static inline const pid_t ios_nextAvailablePid() {
 inline void ios_storeThreadId(pthread_t thread) {
     // To avoid issues when a command starts a command without forking,
     // we only store thread IDs for the first thread of the "process".
-    // fprintf(stderr, "Unlocking pid %x, storing thread %x current value: %x\n", current_pid, thread,  thread_ids[current_pid]);
+    // fprintf(stderr, "Unlocking pid %d, storing thread %x current value: %x\n", current_pid, thread,  thread_ids[current_pid]);
     if (thread_ids[current_pid] == -1) {
         thread_ids[current_pid] = thread;
     }
@@ -224,8 +261,9 @@ inline void ios_storeThreadId(pthread_t thread) {
 char* libc_getenv(const char* variableName) {
     if (environment[current_pid] != NULL) {
         if (variableName == NULL) { return NULL; }
+        // fprintf(stderr, "libc_getenv: %s\n", variableName); fflush(stderr);
         char** envp = environment[current_pid];
-        int varNameLen = strlen(variableName);
+        unsigned long varNameLen = strlen(variableName);
         if (varNameLen == 0) { return NULL; }
         for (int i = 0; i < numVariablesSet[current_pid]; i++) {
             if (envp[i] == NULL) { continue; }
@@ -252,8 +290,8 @@ char* libc_getenv(const char* variableName) {
 }
 
 extern void set_session_errno(int n);
-int ios_setenv(const char* variableName, const char* value, int overwrite) {
-    if (environment[current_pid] != NULL) {
+int ios_setenv_pid(const char* variableName, const char* value, int overwrite, int pid) {
+    if (environment[pid] != NULL) {
         if (variableName == NULL) {
             set_session_errno(EINVAL);
             return -1;
@@ -267,9 +305,9 @@ int ios_setenv(const char* variableName, const char* value, int overwrite) {
             set_session_errno(EINVAL);
             return -1;
         }
-        char** envp = environment[current_pid];
-        int varNameLen = strlen(variableName);
-        for (int i = 0; i < numVariablesSet[current_pid]; i++) {
+        char** envp = environment[pid];
+        unsigned long varNameLen = strlen(variableName);
+        for (int i = 0; i < numVariablesSet[pid]; i++) {
             if (envp[i] == NULL) { continue; }
             if (strncmp(variableName, envp[i], varNameLen) == 0) {
                 if (strlen(envp[i]) > varNameLen) {
@@ -284,16 +322,24 @@ int ios_setenv(const char* variableName, const char* value, int overwrite) {
             }
         }
         // Not found so far, add it to the list:
-        int pos = numVariablesSet[current_pid];
-        environment[current_pid] = realloc(envp, (numVariablesSet[current_pid] + 2) * sizeof(char*));
-        environment[current_pid][pos] = malloc(strlen(variableName) + strlen(value) + 2);
-        environment[current_pid][pos + 1] = NULL;
-        sprintf(environment[current_pid][pos], "%s=%s", variableName, value);
-        numVariablesSet[current_pid] += 1;
+        int pos = numVariablesSet[pid];
+        environment[pid] = realloc(envp, (numVariablesSet[pid] + 2) * sizeof(char*));
+        environment[pid][pos] = malloc(strlen(variableName) + strlen(value) + 2);
+        environment[pid][pos + 1] = NULL;
+        sprintf(environment[pid][pos], "%s=%s", variableName, value);
+        numVariablesSet[pid] += 1;
         return 0;
     } else {
         return setenv(variableName, value, overwrite);
     }
+}
+
+int ios_setenv_parent(const char* variableName, const char* value, int overwrite) {
+    return ios_setenv_pid(variableName, value, overwrite, previousPid[current_pid]);
+}
+
+int ios_setenv(const char* variableName, const char* value, int overwrite) {
+    return ios_setenv_pid(variableName, value, overwrite, current_pid);
 }
 
 int ios_putenv(char* string) {
@@ -334,10 +380,10 @@ int ios_putenv(char* string) {
     }
 }
 
-int ios_unsetenv(const char* variableName) {
+int ios_unsetenv_pid(const char* variableName, int pid) {
     // Someone calls unsetenv once the process has been terminated.
     // Best thing to do is erase the environment and return
-    if (environment[current_pid] != NULL) {
+    if (environment[pid] != NULL) {
         if (variableName == NULL) {
             set_session_errno(EINVAL);
             return -1;
@@ -351,9 +397,9 @@ int ios_unsetenv(const char* variableName) {
             set_session_errno(EINVAL);
             return -1;
         }
-        char** envp = environment[current_pid];
-        int varNameLen = strlen(variableName);
-        for (int i = 0; i < numVariablesSet[current_pid]; i++) {
+        char** envp = environment[pid];
+        unsigned long varNameLen = strlen(variableName);
+        for (int i = 0; i < numVariablesSet[pid]; i++) {
             if (envp[i] == NULL) { continue; }
             if (strncmp(variableName, envp[i], varNameLen) == 0) {
                 if (strlen(envp[i]) > varNameLen) {
@@ -361,30 +407,38 @@ int ios_unsetenv(const char* variableName) {
                         // This variable is defined in the current environment:
                         free(envp[i]);
                         envp[i] = NULL;
-                        if (i < numVariablesSet[current_pid] - 1) {
-                            for (int j = i; j < numVariablesSet[current_pid] - 1; j++) {
+                        if (i < numVariablesSet[pid] - 1) {
+                            for (int j = i; j < numVariablesSet[pid] - 1; j++) {
                                 envp[j] = envp[j+1];
                             }
-                            envp[numVariablesSet[current_pid] - 1] = NULL;
+                            envp[numVariablesSet[pid] - 1] = NULL;
                         }
-                        numVariablesSet[current_pid] -= 1;
-                        environment[current_pid] = realloc(envp, (numVariablesSet[current_pid] + 1) * sizeof(char*));
+                        numVariablesSet[pid] -= 1;
+                        environment[pid] = realloc(envp, (numVariablesSet[pid] + 1) * sizeof(char*));
                         return 0;
                     }
                 }
             }
         }
         /*
-        for (int i = 0; i < numVariablesSet[current_pid]; i++) {
-            char* position = strstr(envp[i],"=");
-            if (strncmp(variableName, envp[i], position - envp[i]) == 0) {
-            }
-        } */
+         for (int i = 0; i < numVariablesSet[pid]; i++) {
+         char* position = strstr(envp[i],"=");
+         if (strncmp(variableName, envp[i], position - envp[i]) == 0) {
+         }
+         } */
         // Not found:
         return 0;
     } else {
         return unsetenv(variableName);
     }
+}
+
+int ios_unsetenv_parent(const char* variableName) {
+    return ios_unsetenv_pid(variableName, previousPid[current_pid]);
+}
+
+int ios_unsetenv(const char* variableName) {
+    return ios_unsetenv_pid(variableName, current_pid);
 }
 
 
@@ -428,6 +482,20 @@ void resetEnvironment(pid_t pid) {
     }
 }
 
+// Used by "env -i": clear all environment variables, but don't clear the environment itself
+void clearEnvironment(pid_t pid) {
+    if (environment[pid] != NULL) {
+        // Free the variables allocated:
+        for (int i = 0; i < numVariablesSet[pid]; i++) {
+            if (environment[pid][i] == NULL) { continue; }
+            free(environment[pid][i]);
+            environment[pid][i] = NULL;
+        }
+        numVariablesSet[pid] = 0;
+    }
+}
+
+
 char** environmentVariables(pid_t pid) {
     if (environment[pid] != NULL) {
         return environment[pid];
@@ -438,6 +506,9 @@ char** environmentVariables(pid_t pid) {
 
 extern int chdir_nolock(const char* path); // defined in ios_system.m
 void ios_releaseThread(pthread_t thread) {
+    if (thread == NULL) {
+        return;
+    }
     // TODO: this is inefficient. Replace with NSMutableArray?
     for (int p = 0; p < IOS_MAX_THREADS; p++) {
         if (thread_ids[p] == thread) {
@@ -454,6 +525,18 @@ void ios_releaseThread(pthread_t thread) {
     // fprintf(stderr, "Not found\n");
 }
 
+void ios_releaseBackgroundThread(pthread_t thread) {
+    // Same as ios_releaseThread, but do not reset the directory.
+    for (int p = 0; p < IOS_MAX_THREADS; p++) {
+        if (thread_ids[p] == thread) {
+            // fprintf(stderr, "Found Id %d\n", p);
+            current_pid = previousPid[p];
+            thread_ids[p] = NULL;
+            return;
+        }
+    }
+    // fprintf(stderr, "Not found\n");
+}
 
 void ios_releaseThreadId(pid_t pid) {
     // Don't reset the environment; sometimes, commands try to change the environment while it is being erased.
@@ -470,10 +553,12 @@ void ios_releaseThreadId(pid_t pid) {
     }
 }
 
-pid_t ios_currentPid() {
+pid_t ios_currentPid(void) {
     return current_pid;
 }
 
+// Note to self: do not redefine getpid() unless you have a way to make it consistent even when a "process" starts a new thread.
+// 0MQ and asyncio rely on this.
 pid_t fork(void) { return ios_nextAvailablePid(); } // increases current_pid by 1.
 pid_t ios_fork(void) { return ios_nextAvailablePid(); } // increases current_pid by 1.
 pid_t vfork(void) { return ios_nextAvailablePid(); }
@@ -481,7 +566,9 @@ pid_t vfork(void) { return ios_nextAvailablePid(); }
 // simple replacement of waitpid for swift programs
 // We use "optnone" to prevent optimization, otherwise the while loops never end.
 __attribute__ ((optnone)) void ios_waitpid(pid_t pid) {
-
+    
+    executeWebAssemblyCommandsInOrder();
+    
     pthread_t threadToWaitFor;
     // Old system: no explicit pid, just store last thread Id.
     if ((pid == -1) || (pid == 0)) {
@@ -508,6 +595,7 @@ __attribute__ ((optnone)) pid_t waitpid(pid_t pid, int *stat_loc, int options) {
     //  0 = the call waits for any child process in the process group of the caller
     
     if (options && WNOHANG) {
+        executeWebAssemblyCommandsInOrder(); // start executing webAssembly commands
         // WNOHANG: just check that the process is still running:
         pthread_t threadToWaitFor;
         if ((pid == -1) || (pid == 0)) threadToWaitFor = ios_getLastThreadId();
@@ -556,31 +644,72 @@ void vwarnx(const char *fmt, va_list args)
 }
 // void err(int eval, const char *fmt, ...);
 void err(int eval, const char *fmt, ...) {
-    va_list argptr;
-    va_start(argptr, fmt);
-    vwarn(fmt, argptr);
-    va_end(argptr);
+    if (fmt != NULL) {
+        va_list argptr;
+        va_start(argptr, fmt);
+        vwarn(fmt, argptr);
+        va_end(argptr);
+    }
+    ios_exit(eval);
+}
+// void errc(int eval, int errorcode, const char *fmt, ...);
+void errc(int eval, int errorcode, const char *fmt, ...) {
+    if (thread_stderr == NULL) thread_stderr = stderr;
+    if (fmt != NULL) {
+        va_list argptr;
+        va_start(argptr, fmt);
+        fputs(ios_progname(), thread_stderr);
+        fputs(": ", thread_stderr);
+        vfprintf(thread_stderr, fmt, argptr);
+        fputs(": ", thread_stderr);
+        fputs(strerror(errorcode), thread_stderr);
+        putc('\n', thread_stderr);
+        va_end(argptr);
+    }
     ios_exit(eval);
 }
 //     void errx(int eval, const char *fmt, ...);
 void errx(int eval, const char *fmt, ...) {
-    va_list argptr;
-    va_start(argptr, fmt);
-    vwarnx(fmt, argptr);
-    va_end(argptr);
+    if (fmt != NULL) {
+        va_list argptr;
+        va_start(argptr, fmt);
+        vwarnx(fmt, argptr);
+        va_end(argptr);
+    }
     ios_exit(eval);
 }
 //   void warn(const char *fmt, ...);
 void warn(const char *fmt, ...) {
-    va_list argptr;
-    va_start(argptr, fmt);
-    vwarn(fmt, argptr);
-    va_end(argptr);
+    if (fmt != NULL) {
+        va_list argptr;
+        va_start(argptr, fmt);
+        vwarn(fmt, argptr);
+        va_end(argptr);
+    }
 }
 //   void warnx(const char *fmt, ...);
 void warnx(const char *fmt, ...) {
-    va_list argptr;
-    va_start(argptr, fmt);
-    vwarnx(fmt, argptr);
-    va_end(argptr);
+    if (fmt != NULL) {
+        va_list argptr;
+        va_start(argptr, fmt);
+        vwarnx(fmt, argptr);
+        va_end(argptr);
+    }
+}
+// void warnc(int code, const char *fmt, ...);
+void warnc(int code, const char *fmt, ...) {
+    if (thread_stderr == NULL) thread_stderr = stderr;
+    fputs(ios_progname(), thread_stderr);
+    if (fmt != NULL)
+    {
+        va_list argptr;
+        va_start(argptr, fmt);
+        fputs(": ", thread_stderr);
+        vfprintf(thread_stderr, fmt, argptr);
+        vwarn(fmt, argptr);
+        va_end(argptr);
+    }
+    fputs(": ", thread_stderr);
+    fputs(strerror(code), thread_stderr);
+    putc('\n', thread_stderr);
 }

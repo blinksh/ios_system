@@ -57,7 +57,7 @@ __FBSDID("$FreeBSD$");
 #include "ios_error.h"
 
 
-static int find_compare(const FTSENT * const *s1, const FTSENT * const *s2);
+static int find_compare(const FTSENT **s1, const FTSENT **s2);
 
 /*
  * find_compare --
@@ -66,7 +66,7 @@ static int find_compare(const FTSENT * const *s1, const FTSENT * const *s2);
  *	order within each directory.
  */
 static int
-find_compare(const FTSENT * const *s1, const FTSENT * const *s2)
+find_compare(const FTSENT **s1, const FTSENT **s2)
 {
 
 	return (strcoll((*s1)->fts_name, (*s2)->fts_name));
@@ -187,6 +187,10 @@ find_execute(PLAN *plan, char *paths[])
 
 	exitstatus = 0;
 	while (errno = 0, (entry = fts_read(tree)) != NULL) {
+        // debugging
+        char dirBefore[MAXPATHLEN];
+        getwd(dirBefore);
+        //
 		if (maxdepth != -1 && entry->fts_level >= maxdepth) {
 			if (fts_set(tree, entry, FTS_SKIP))
 				err(1, "%s", entry->fts_path);
@@ -235,6 +239,13 @@ find_execute(PLAN *plan, char *paths[])
 		 * the work specified by the user on the command line.
 		 */
 		for (p = plan; p && (p->execute)(p, entry); p = p->next);
+        // debugging
+        char dirAfter[MAXPATHLEN];
+        getwd(dirAfter);
+        if (strcmp(dirBefore, dirAfter) != 0) {
+            fprintf(stderr, "Active directory changed: %s %s\n", ios_getBookmarkedVersion(dirBefore), ios_getBookmarkedVersion(dirAfter));
+        }
+        //
 	}
 	e = errno;
 	finish_execplus();

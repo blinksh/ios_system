@@ -16,6 +16,9 @@ let allSchemes = [
     "files",
     "shell",
     "ssh_cmd",
+    "ssh_cmdA",
+    "ssh_agent",
+    "sshd",
     "tar",
     "text",
     ]

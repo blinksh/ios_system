@@ -5,7 +5,6 @@
 //  Copyright © 2017 N. Holzschuch. All rights reserved.
 //
 
-
 #import <UIKit/UIKit.h>
 
 #include "ios_system.h"
@@ -51,6 +50,22 @@ __thread FILE* thread_stdout;
 __thread FILE* thread_stderr;
 __thread void* thread_context;
 
+FILE* ios_stdin(void) {
+    return thread_stdin;
+}
+
+FILE* ios_stdout(void) {
+    return thread_stdout;
+}
+
+FILE* ios_stderr(void) {
+    return thread_stderr;
+}
+
+void* ios_context(void) {
+    return thread_context;
+}
+
 // Parameters for each session. We can have multiple sessions running in parallel.
 typedef struct _sessionParameters {
     bool isMainThread;   // are we on the first command?
@@ -58,7 +73,7 @@ typedef struct _sessionParameters {
     char previousDirectory[MAXPATHLEN];
     char localMiniRoot[MAXPATHLEN];
     pthread_t current_command_root_thread; // thread ID of first command
-    pthread_t lastThreadId; // thread ID of last command
+    pthread_t lastThreadId; // thread ID of last command.
     pthread_t mainThreadId; // thread ID of parent command, if any (e.g. vim, which starts "sh -c cd dir && flake8 file")
     FILE* stdin;
     FILE* stdout;
@@ -66,9 +81,11 @@ typedef struct _sessionParameters {
     FILE* tty;
     void* context;
     int global_errno;
-    char commandName[NAME_MAX];
-    char columns[4];
-    char lines[4];
+    int numCommandsAllocated;
+    int numCommand;
+    char** commandName;
+    char columns[5];
+    char lines[5];
     bool activePager;
 } sessionParameters;
 
@@ -88,7 +105,13 @@ static void initSessionParameters(sessionParameters* sp) {
     sp->stderr = stderr;
     sp->tty = stdin;
     sp->context = nil;
-    sp->commandName[0] = 0;
+    sp->numCommandsAllocated = 10; // 10 slots available to store commands, will realloc if more needed.
+    sp->commandName = malloc(sizeof(char*) * sp->numCommandsAllocated);
+    for (int i = 0; i < sp->numCommandsAllocated; i++) {
+        sp->commandName[i] = malloc(sizeof(char) * NAME_MAX);
+    }
+    sp->commandName[0][0] = 0;
+    sp->numCommand = 0;
     strcpy(sp->columns, "80");
     strcpy(sp->lines, "80");
     sp->activePager = FALSE;
@@ -98,8 +121,8 @@ void ios_setBookmarkDictionaryName(NSString* name) {
     ios_bookmarkDictionaryName = name;
 }
 
-void ios_printBookmarkedVersion(char* p) {
-    // p is a directory. See if there is a bookmark that can make it shorter:
+const char* ios_getBookmarkedVersion(const char* p) {
+    // p is a directory. Get the bookmarked version to make it shorter:
     NSString* pathString = [NSString stringWithUTF8String:p];
     NSString* privatePrefix = @"/private";
     if ([pathString hasPrefix:privatePrefix]) {
@@ -110,33 +133,33 @@ void ios_printBookmarkedVersion(char* p) {
     if ([homePath hasPrefix:privatePrefix]) {
         homePath = [homePath substringFromIndex:[privatePrefix length]];
     }
-    NSLog(@"ios_printBookmarkedVersion: %s %s", homePath.UTF8String, pathString.UTF8String);
+    // NSLog(@"ios_getBookmarkedVersion: %s %s", homePath.UTF8String, pathString.UTF8String);
     if ([pathString hasPrefix:homePath]) {
-        pathString = [pathString stringByReplacingOccurrencesOfString:homePath withString:@""];
-        fprintf(thread_stdout, "~%s\n", pathString.UTF8String);
-        return;
+        pathString = [pathString stringByReplacingOccurrencesOfString:homePath withString:@"~"];
+        return pathString.UTF8String;
     }
     if (ios_bookmarkDictionaryName == nil) {
-        fprintf(thread_stdout, "%s\n", p);
-        return;
+        return p;
     }
     NSDictionary *tildeExpansionDictionary = [[NSUserDefaults standardUserDefaults] dictionaryForKey:ios_bookmarkDictionaryName];
     if (tildeExpansionDictionary == nil) {
-        fprintf(thread_stdout, "%s\n", p);
-        return;
+        return p;
     }
+    NSString* foundString = @"";
     for (NSString* bookmark in tildeExpansionDictionary) {
         NSString* bookmarkPath = tildeExpansionDictionary[bookmark];
         if ([bookmarkPath hasPrefix:privatePrefix]) {
             bookmarkPath = [bookmarkPath substringFromIndex:[privatePrefix length]];
         }
         if ([pathString hasPrefix:bookmarkPath]) {
-            pathString = [pathString stringByReplacingOccurrencesOfString:bookmarkPath withString:bookmark];
-            fprintf(thread_stdout, "~%s\n", pathString.UTF8String);
-            return;
+            NSString* testString = [pathString stringByReplacingOccurrencesOfString:bookmarkPath withString:[@"~" stringByAppendingString: bookmark]];
+            if ((foundString.length == 0) || (testString.length < foundString.length))
+                foundString = testString;
         }
     }
-    fprintf(thread_stdout, "%s\n", p);
+    if (foundString.length > 0)
+        return foundString.UTF8String;
+    return p;
 }
 
 static NSMutableDictionary* sessionList;
@@ -151,18 +174,37 @@ static const int MaxPythonInterpreters = 6; // const so we can allocate an array
 int numPythonInterpreters = MaxPythonInterpreters; // Apps can overwrite this
 static bool PythonIsRunning[MaxPythonInterpreters];
 static int currentPythonInterpreter = 0;
+static bool showPythonInterpreterAlert = true;
 // Same with perl:
-static const int MaxPerlInterpreters = 3; // const so we can allocate an array
+static const int MaxPerlInterpreters = 4; // const so we can allocate an array
 // cpan starts perl Makefile.PL, which starts perl -e print Version, so at least 3.
 int numPerlInterpreters = MaxPerlInterpreters; // Apps can overwrite this
 static bool PerlIsRunning[MaxPerlInterpreters];
 static int currentPerlInterpreter = 0;
+// same with TeX, with a twist:
+static const int MaxTeXInterpreters = 2; // const so we can allocate an array
+// (La)TeX can start another (La)TeX command for TikZ
+int numTeXInterpreters = MaxTeXInterpreters; // Apps can overwrite this
+static bool TeXIsRunning[MaxTeXInterpreters];
+static int currentTeXInterpreter = 0;
+NSArray *TeXcommands = nil; // initialized later
+// Multiple dash:
+// limit to 6 (for now)
+static const int MaxDashCommands = 6; // const so we can allocate an array
+int numDashCommands = MaxDashCommands; // Apps can overwrite this
+static bool dashIsRunning[MaxDashCommands];
+static int currentDashCommand = 0;
+// multiple ssh (limit to 2):
+static const int MaxSshCommands = 2; // const so we can allocate an array
+int numSshCommands = MaxSshCommands; // Apps can overwrite this
+static bool sshIsRunning[MaxSshCommands];
+static int currentSshCommand = 0;
+
+
 // pointers for sh sessions:
 char* sh_session = "sh_session";
 
 // replace system-provided exit() by our own:
-// Make sure we call pthread_cancel(currentSession->current_command_root_thread)
-// as much as possible, because ios_exit can be called from a signal handler now.
 void ios_exit(int n) {
     if (currentSession != NULL) {
         currentSession->global_errno = n;
@@ -171,7 +213,9 @@ void ios_exit(int n) {
 }
 
 void set_session_errno(int n) {
-    currentSession->global_errno = n;
+    if (currentSession != NULL) {
+        currentSession->global_errno = n;
+    }
 }
 
 // Replace standard abort and exit functions with ours:
@@ -231,8 +275,8 @@ void ios_setWindowSize(int width, int height, const void* sessionId) {
         return;
     }
 
-    sprintf(resizedSession->columns, "%d", width);
-    sprintf(resizedSession->lines, "%d",height);
+    sprintf(resizedSession->columns, "%d", MIN(width, 9999));
+    sprintf(resizedSession->lines, "%d", MIN(height, 9999));
     // Also send SIGWINCH to the main thread of resizedSession:
     if (resizedSession->current_command_root_thread != NULL) {
         pthread_kill(resizedSession->current_command_root_thread, SIGWINCH);
@@ -263,17 +307,40 @@ char * ios_getenv(const char *name) {
     return libc_getenv(name);
 }
 
+void ios_IsMainThread(bool value) {
+    currentSession->isMainThread = value;
+}
 
-int ios_getCommandStatus() {
+int ios_getCommandStatus(void) {
     if (currentSession != NULL) return currentSession->global_errno;
     else return 0;
 }
 
 extern const char* ios_progname(void) {
-    if (currentSession != NULL) return currentSession->commandName;
+    if (currentSession != NULL) {
+        if (currentSession->numCommand <= 0)
+            return currentSession->commandName[0];
+        else
+            return currentSession->commandName[currentSession->numCommand - 1];
+    }
     else return getprogname();
 }
 
+const char* ios_expandtilde(const char *login) {
+    // expand "~something" with the content of userPreference dictionary (to be set by each app)
+    // About the same behaviour as:
+    // struct passwd *pw = getpwnam(name);
+    // return pw ? pw->pw_dir : 0;
+    NSDictionary *tildeExpansionDictionary = [[NSUserDefaults standardUserDefaults] dictionaryForKey:ios_bookmarkDictionaryName];
+    if (tildeExpansionDictionary != nil) {
+        NSString* name = [NSString stringWithUTF8String:login];
+        NSString* expandedPath = tildeExpansionDictionary[name];
+        if (expandedPath != nil) {
+            return [expandedPath UTF8String];
+        }
+    }
+    return NULL;
+}
 
 typedef struct _functionParameters {
     int argc;
@@ -283,26 +350,56 @@ typedef struct _functionParameters {
     FILE *stdin, *stdout, *stderr;
     void* context;
     void* dlHandle;
+    bool isPipeIn;
     bool isPipeOut;
     bool isPipeErr;
+    bool backgroundCommand;
+    int  numInterpreter;
+    bool storeRootThread;
     sessionParameters* session;
 } functionParameters;
 
 extern pthread_mutex_t pid_mtx;
 extern _Atomic(int) cleanup_counter;
+extern void ios_releaseBackgroundThread(pthread_t thread);
+extern void startedPreparingWebAssemblyCommand(void);
+
 static void cleanup_function(void* parameters) {
     // This function is called when pthread_exit() or ios_kill() is called
+    pthread_t current_thread = pthread_self();
     functionParameters *p = (functionParameters *) parameters;
+    bool backgroundCommand = p->backgroundCommand;
     char* commandName = p->argv[0];
-    NSLog(@"cleanup_function: %s thread_id %x pid: %d stdin %d stdout %d stderr %d isPipeOut %d", commandName, pthread_self(), ios_currentPid(), fileno(p->stdin), fileno(p->stdout), fileno(p->stderr), p->isPipeOut);
-    NSLog(@"currentSession->commandName: %s", currentSession->commandName);
+    char* currentSessionCommandName = NULL;
+    bool toNonInteractive = false;
+    
+    if (currentSession->numCommand <= 0)
+        currentSessionCommandName = currentSession->commandName[0];
+    else
+        currentSessionCommandName = currentSession->commandName[currentSession->numCommand - 1];
+    NSLog(@"cleanup_function: %s thread_id %x pid: %d stdin %d stdout %d stderr %d isPipeOut %d", commandName, current_thread, ios_currentPid(), fileno(p->stdin), fileno(p->stdout), fileno(p->stderr), p->isPipeOut);
+    NSLog(@"currentSession->commandName: %s root_thread: %x", currentSessionCommandName, currentSession->current_command_root_thread);
+    NSLog(@"Num commands stored: %d", currentSession->numCommand);
     if ((strcmp(commandName, "less") == 0) || (strcmp(commandName, "more") == 0)) {
-        if ((strlen(currentSession->commandName) > 0) && (strcmp(currentSession->commandName, "less") != 0) && (strcmp(currentSession->commandName, "more") != 0)) {
+        if ((strlen(currentSessionCommandName) > 0)
+            && (strcmp(currentSessionCommandName, "less") != 0)
+            && (strcmp(currentSessionCommandName, "more") != 0)) {
             // Command was "root_command | sthg | less". We need to kill root command.
             // If less itself started another command, then currentSession->commandName is "".
-            // Unless less / more was started as a pager, in which case don't kill root command (e.g. for man).
+            // Unless less / more was started as a pager, in which case don't kill root command (e.g. for man and ipython help).
             pthread_kill(currentSession->current_command_root_thread, SIGINT);
             while (fgetc(thread_stdin) != EOF) { } // flush input, otherwise previous command gets blocked.
+        } else {
+            // but for python or ipython help(), flush the content of stdin:
+            if ((currentSession->numCommand > 1) &&
+                ((strncmp(currentSession->commandName[currentSession->numCommand - 2], "ipython", 7) == 0) ||
+                 (strncmp(currentSession->commandName[currentSession->numCommand - 2], "isympy", 6) == 0) ||
+                 (strncmp(currentSession->commandName[currentSession->numCommand - 2], "python", 6) == 0))) {
+                while (fgetc(thread_stdin) != EOF) { } // flush input to help() command
+                if (strncmp(currentSession->commandName[currentSession->numCommand - 2], "python", 6) == 0) {
+                    toNonInteractive = true;
+                }
+            }
         }
         currentSession->activePager = FALSE;
     }
@@ -310,62 +407,64 @@ static void cleanup_function(void* parameters) {
     // There is an exception for ssh, which can be started by scp or sftp. They will wait for it.
     if ((!joinMainThread) && p->isPipeOut && (strcmp(commandName, "ssh") != 0)) {
         if (currentSession->current_command_root_thread != 0) {
-            if (currentSession->current_command_root_thread != pthread_self()) {
-                NSLog(@"Thread %x is waiting for root_thread of currentSession: %x \n", pthread_self(), currentSession->current_command_root_thread);
-                while ((currentSession->current_command_root_thread != 0) && (currentSession->current_command_root_thread != pthread_self())) { }
-                NSLog(@"Thread %x is done waiting for root_thread of currentSession: %x \n", pthread_self(), currentSession->current_command_root_thread);
+            if (currentSession->current_command_root_thread != current_thread) {
+                NSLog(@"Thread %x is waiting for root_thread of currentSession: %x \n", current_thread, currentSession->current_command_root_thread);
+                while ((currentSession->current_command_root_thread != 0) && (currentSession->current_command_root_thread != current_thread)) {
+                    fflush(thread_stdout);
+                    fflush(thread_stderr);
+                }
+                NSLog(@"Thread %x is done waiting for root_thread of currentSession: %x \n", current_thread, currentSession->current_command_root_thread);
             } else {
-                NSLog(@"Terminating root_thread of currentSession %x \n", pthread_self());
+                NSLog(@"Terminating root_thread of currentSession %x \n", current_thread);
                 currentSession->current_command_root_thread = 0;
             }
         }
     }
+    fcntl(fileno(thread_stdin), F_SETNOSIGPIPE);
+    fcntl(fileno(thread_stdout), F_SETNOSIGPIPE);
+    fcntl(fileno(thread_stderr), F_SETNOSIGPIPE);
     fflush(thread_stdin);
     fflush(thread_stdout);
     fflush(thread_stderr);
     // release parameters:
-    NSLog(@"Terminating command: %s thread_id %x stdin %d stdout %d stderr %d isPipeOut %d", commandName, pthread_self(), fileno(p->stdin), fileno(p->stdout), fileno(p->stderr), p->isPipeOut);
+    NSLog(@"Terminating command: %s thread_id %x stdin %d stdout %d stderr %d isPipeOut %d", commandName, current_thread, fileno(p->stdin), fileno(p->stdout), fileno(p->stderr), p->isPipeOut);
     // Specific to run multiple python3 interpreters:
+    NSString* commandNameString = [NSString stringWithCString: commandName encoding:NSUTF8StringEncoding];
+    // Can we close stdin too?
+    bool mustCloseStdin = fileno(p->stdin) != fileno(stdin);
     if (strncmp(commandName, "python", 6) == 0) {
         // It could be one of the multiple python3 interpreters
-        if (strlen(commandName) == 6) { // "python"
-            PythonIsRunning[0] = false;
-        } else if (strlen(commandName) == strlen("python") + 1) { // python3, pythonA...
-            char commandNumber = commandName[6];
-            if (commandNumber == '3') PythonIsRunning[0] = false;
-            else {
-                commandNumber -= 'A' - 1;
-                if ((commandNumber > 0) && (commandNumber < MaxPythonInterpreters))
-                    PythonIsRunning[commandNumber] = false;
-            }
-        }
+        PythonIsRunning[p->numInterpreter] = false;
+        mustCloseStdin = false;
     }
-    // Same with multiple perl interpreters:
+    // Same with multiple perl or TeX interpreters:
     else if (strncmp(commandName, "perl", 4) == 0) {
-        NSLog(@"Ending a Perl interpreter: %s", commandName);
-        // It could be one of the multiple perl interpreters
-        if (strlen(commandName) == 4) { // "perl"
-            PerlIsRunning[0] = false;
-            NSLog(@"Reset PerlIsRunning for %d, with command: %s", 0, commandName);
-        } else if (strlen(commandName) == strlen("perl") + 1) { // perlA...
-            char commandNumber = commandName[4];
-            commandNumber -= 'A' - 1;
-            if ((commandNumber > 0) && (commandNumber < MaxPerlInterpreters))
-                PerlIsRunning[commandNumber] = false;
-            NSLog(@"Reset PerlIsRunning for %d, with command: %s", commandNumber, commandName);
-        }
+        NSLog(@"Ending a Perl interpreter: %d", p->numInterpreter);
+        PerlIsRunning[p->numInterpreter] = false;
+    } else if ([TeXcommands containsObject: commandNameString]) {
+        NSLog(@"Ending a TeX command: %d", p->numInterpreter);
+        TeXIsRunning[p->numInterpreter] = false;
+    } else if (strcmp(commandName, "dash") == 0) {
+        NSLog(@"Ending a dash command: %d", p->numInterpreter);
+        dashIsRunning[p->numInterpreter] = false;
+    } else if (strcmp(commandName, "ssh") == 0) {
+        NSLog(@"Ending a ssh command: %d", p->numInterpreter);
+        sshIsRunning[p->numInterpreter] = false;
     }
-    if (strcmp(currentSession->commandName, commandName) == 0) {
-        currentSession->commandName[0] = 0;
-    }
+    if (currentSession->numCommand > 0)
+        currentSession->numCommand -= 1;
+    else
+        currentSession->commandName[0][0] = 0;
+    // if (strcmp(currentSession->commandName, commandName) == 0) {
+    //     currentSession->commandName[0] = 0;
+    // }
     bool isSh = strcmp(p->argv[0], "sh") == 0;
+    bool isWasm = strcmp(p->argv[0], "wasm") == 0;
     for (int i = 0; i < p->argc; i++) free(p->argv_ref[i]);
     free(p->argv_ref);
     free(p->argv);
-    bool isLastThread = (currentSession->lastThreadId == pthread_self());
-    // Required for Jupyter. Must check for Blink/LibTerm/iVim:
-    // Is that the issue in iVim?
-    bool mustCloseStderr = (fileno(p->stderr) != fileno(stderr)) && (fileno(p->stderr) != fileno(p->stdout));
+    bool isLastThread = (currentSession->lastThreadId == current_thread);
+    bool mustCloseStderr = (fileno(p->stderr) != fileno(stderr)) && (fileno(p->stderr) != fileno(p->stdout))  && (fileno(p->stdout) != fileno(p->stdin));
     if (!isSh) {
         mustCloseStderr &= p->isPipeErr;
         if (currentSession != nil) {
@@ -374,6 +473,7 @@ static void cleanup_function(void* parameters) {
         }
     }
     // Some programs stop waiting as soon as stdout/stderr close (which makes sense)
+    // This fclose does close the fileno, but I find it re-opened later.
     cleanup_counter++;
     while (pthread_mutex_trylock(&pid_mtx) != 0) { } // Someone else has the lock, so we wait.
     pthread_mutex_unlock(&pid_mtx);
@@ -381,7 +481,8 @@ static void cleanup_function(void* parameters) {
         NSLog(@"Closing stderr (mustCloseStderr): %d \n", fileno(p->stderr));
         int res = fclose(p->stderr);
     }
-    bool mustCloseStdout = fileno(p->stdout) != fileno(stdout);
+    // In some cases, we find that stdout is equal to stdin after executing the command. We should not close stdin!
+    bool mustCloseStdout = (fileno(p->stdout) != fileno(stdout)) && (fileno(p->stdout) != fileno(p->stdin));
     if (!isSh) {
         mustCloseStdout &= p->isPipeOut;
         if (currentSession != nil) {
@@ -392,28 +493,55 @@ static void cleanup_function(void* parameters) {
         NSLog(@"Closing stdout (mustCloseStdout): %d \n", fileno(p->stdout));
         int res = fclose(p->stdout);
     }
+    if (!isSh) {
+        mustCloseStdin &= p->isPipeIn;
+        if (currentSession != nil) {
+            mustCloseStdin &= fileno(p->stdin) != fileno(currentSession->stdin);
+        }
+        // we cannot close stdin for wasm commands:
+        mustCloseStdin &= !isWasm;
+        // commands started by Python: Python will close stdin (Lua and Perl? not broken, AFAIK)
+        if ((currentSession->numCommand > 0) && (strncmp(currentSession->commandName[currentSession->numCommand - 1], "python", 6) == 0)) {
+            // NSLog(@"Command started by Python, not closing stdin: %d \n", fileno(p->stdin));
+            mustCloseStdin &= false;
+        }
+    }
+    if (mustCloseStdin) {
+        NSLog(@"Closing stdin (mustCloseStdin): %d \n", fileno(p->stdin));
+        int res = fclose(p->stdin);
+    }
     if ((p->dlHandle != RTLD_SELF) && (p->dlHandle != RTLD_MAIN_ONLY)
         && (p->dlHandle != RTLD_DEFAULT) && (p->dlHandle != RTLD_NEXT))
         dlclose(p->dlHandle);
     free(parameters); // This was malloc'ed in ios_system
     if (isLastThread) {
-        NSLog(@"Terminating lastthread of currentSession %x lastThreadId %x pid: %d\n", pthread_self(), currentSession->lastThreadId, ios_currentPid());
+        NSLog(@"Terminating lastthread of currentSession %x lastThreadId %x pid: %d\n", current_thread, currentSession->lastThreadId, ios_currentPid());
         currentSession->lastThreadId = 0;
     } else {
         NSLog(@"Current thread %x lastthread %x pid: %d\n", pthread_self(), currentSession->lastThreadId, ios_currentPid());
     }
-    ios_releaseThread(pthread_self());
-    if (currentSession->current_command_root_thread == pthread_self()) {
+    if (backgroundCommand) {
+        // If it's a background command, call ios_releaseBackgroundThread:
+        // NSLog(@"Releasing a backgroundCommand\n");
+        ios_releaseBackgroundThread(current_thread);
+    } else {
+        if (toNonInteractive) {
+            ios_stopInteractive();
+        }
+        ios_releaseThread(current_thread);
+    }
+    if (currentSession->current_command_root_thread == current_thread) {
         currentSession->current_command_root_thread = 0;
     }
-    if (currentSession->mainThreadId == pthread_self()) {
+    if (currentSession->mainThreadId == current_thread) {
         currentSession->mainThreadId = 0;
     }
     cleanup_counter--;
+    NSLog(@"returning from cleanup_function\n");
 }
 
 // Avoir calling crash_handler several times:
-static __thread crash_handler_called = false;
+static __thread bool crash_handler_called = false;
 void crash_handler(int sig) {
     if (thread_stderr == NULL) thread_stderr = stderr;
     if (!crash_handler_called) {
@@ -422,15 +550,25 @@ void crash_handler(int sig) {
             fputs("segmentation fault\n", thread_stderr);
         } else if (sig == SIGBUS) {
             fputs("bus error\n", thread_stderr);
+        } else if (sig == SIGPIPE) {
+            fputs("pipe error\n", thread_stderr);
+            return;
         }
+        ios_exit(1);
     }
-    ios_exit(1);
 }
 
 static void* run_function(void* parameters) {
     functionParameters *p = (functionParameters *) parameters;
-    NSLog(@"Storing thread_id: %x pid: %d isPipeOut: %x isPipeErr: %x stdin %d stdout %d stderr %d command= %s\n", pthread_self(), ios_currentPid(), p->isPipeOut, p->isPipeErr, fileno(p->stdin), fileno(p->stdout), fileno(p->stderr), p->argv[0]);
+    NSLog(@"Storing thread_id: %x pid: %d isPipeOut: %x isPipeErr: %x stdin %d stdout %d stderr %d command= %s\n", pthread_self(), ios_currentPid(), p->isPipeOut, p->isPipeErr,
+          (p->stdin == nil) ? -1 : fileno(p->stdin),
+          (p->stdout == nil) ? -1 : fileno(p->stdout),
+          (p->stderr == nil) ? -1 : fileno(p->stderr), p->argv[0]);
     ios_storeThreadId(pthread_self());
+    if (p->storeRootThread && (p->session != NULL)) {
+        NSLog(@"Storing thread_id: %x as root_thread\n", pthread_self());
+        p->session->current_command_root_thread = pthread_self();
+    }
     // NSLog(@"Starting command: %s thread_id %x", p->argv[0], pthread_self());
     // re-initialize for getopt:
     // TODO: move to __thread variable for optind too
@@ -449,6 +587,7 @@ static void* run_function(void* parameters) {
 
     signal(SIGSEGV, crash_handler);
     signal(SIGBUS, crash_handler);
+    signal(SIGPIPE, crash_handler);
 
     // Because some commands change argv, keep a local copy for release.
     p->argv_ref = (char **)malloc(sizeof(char*) * (p->argc + 1));
@@ -461,10 +600,11 @@ static void* run_function(void* parameters) {
     }
     @catch (NSException *exception)
     {
-      // Print exception information
+      // Print exception information.
       NSLog( @"NSException caught" );
       NSLog( @"Name: %@", exception.name);
       NSLog( @"Reason: %@", exception.reason );
+        fprintf(thread_stderr, "Command %s was interrupted because it triggered a system exception: %s: %s\n", p->argv[0], exception.name.UTF8String, exception.reason.UTF8String);
       return NULL;
     }
     @finally
@@ -478,11 +618,12 @@ static void* run_function(void* parameters) {
 static NSString* miniRoot = nil; // limit operations to below a certain directory (~, usually).
 static NSArray<NSString*> *allowedPaths = nil;
 static NSDictionary *commandList = nil;
+NSArray *backgroundCommandList = nil;
 // do recompute directoriesInPath only if $PATH has changed
 static NSString* fullCommandPath = @"";
 static NSArray *directoriesInPath;
 
-void initializeEnvironment() {
+void initializeEnvironment(void) {
     // setup a few useful environment variables
     // Initialize paths for application files, including history.txt and keys
     NSString *docsPath;
@@ -514,6 +655,7 @@ void initializeEnvironment() {
     setenv("SSH_HOME", docsPath.UTF8String, 0);  // SSH keys in ~/Documents/.ssh/ or [Cloud Drive]/.ssh
     setenv("DIG_HOME", docsPath.UTF8String, 0);  // .digrc is in ~/Documents/.digrc or [Cloud Drive]/.digrc
     setenv("CURL_HOME", docsPath.UTF8String, 0); // CURL config in ~/Documents/ or [Cloud Drive]/
+    setenv("CURLOPT_SSH_KNOWNHOSTS", [docsPath stringByAppendingPathComponent:@".ssh/known_hosts"].UTF8String, 0);
     setenv("SSL_CERT_FILE", [docsPath stringByAppendingPathComponent:@"cacert.pem"].UTF8String, 0); // SLL cacert.pem in ~/Documents/cacert.pem or [Cloud Drive]/cacert.pem
     // iOS already defines "HOME" as the home dir of the application
     for (int i = 0; i < MaxPythonInterpreters; i++) PythonIsRunning[i] = false;
@@ -557,23 +699,33 @@ void initializeEnvironment() {
     setenv("PATH", fullCommandPath.UTF8String, 1); // 1 = override existing value
     // Store the maximum number of file descriptors allowed:
     getrlimit(RLIMIT_NOFILE, &limitFilesOpen);
+    // Initialize the array with the name of TeX commands (this might be too many commands):
+    TeXcommands = @[@"amstex", @"cslatex", @"csplain", @"eplain", @"etex", @"jadetex", @"latex", @"mex", @"mllatex", @"mltex", @"pdfsclatex", @"pdfcsplain", @"pdfetex", @"pdfjadetex", @"pdflatex", @"pdfmex", @"pdftex", @"pdfxmltex", @"tex", @"texsis", @"utf8mex", @"xmltex", @"texlua", @"texluac", @"dvilualatex", @"dviluatex", @"lualatex", @"luatex", @"luahbtex", @"mptopdf", @"optex",
+                    @"xetex", @"xelatex", @"dvipdfmx", @"xdvipdfmx",
+        @"amstexA", @"cslatexA", @"csplainA", @"eplainA", @"etexA", @"jadetexA", @"latexA", @"mexA", @"mllatexA", @"mltexA", @"pdfsclatexA", @"pdfcsplainA", @"pdfetexA", @"pdfjadetexA", @"pdflatexA", @"pdfmexA", @"pdftexA", @"pdfxmltexA", @"texA", @"texsisA", @"utf8mexA", @"xmltexA", @"texluaA", @"texluacA", @"dvilualatexA", @"dviluatexA", @"lualatexA", @"luatexA", @"luahbtexA", @"mptopdfA", @"optexA",
+                    @"xetexA", @"xelatexA",  @"dvipdfmxA", @"xdvipdfmxA"];
 }
 
 NSString * pathJoin(NSString * segmentA, NSString * segmentB);
+static char* unquoteArgument(char* argument);
 
 static char* parseArgument(char* argument, char* command) {
     // expand all environment variables, convert "~" to $HOME (only if localFile)
     // we also pass the shell command for some specific behaviour (don't do this for that command)
     NSString* argumentString = [NSString stringWithCString:argument encoding:NSUTF8StringEncoding];
+    // NSLog(@"parsing argument, argumentString= %s", argumentString.UTF8String);
     // If command == "export", first extract the value string here.
     NSString* variableName;
     if (strcmp(command, "export") == 0) {
-        NSArray<NSString*>* components = [argumentString componentsSeparatedByString:@"="];
-        variableName = components[0];
-        if (components.count > 1) {
-            argumentString = [argumentString substringFromIndex:(variableName.length + 1)];
+        char* equalSign=strchr(argument,'=');
+        if (equalSign && (strlen(equalSign) > 0)) {
+            char* argumentCString=equalSign+1;
+            argumentCString = unquoteArgument(argumentCString);
+            variableName = [argumentString substringToIndex:(equalSign - argument)];
+            argumentString = [NSString stringWithCString:argumentCString encoding:NSUTF8StringEncoding];
+            // NSLog(@"parsing argument, variable name= %s argument= %s", variableName.UTF8String, argumentString.UTF8String);
         } else {
-            // No equal sign, no change. export_main will reject this.
+            // No equal sign, or nothing after. export_main will take care of this.
             return argument;
         }
     }
@@ -595,9 +747,11 @@ static char* parseArgument(char* argument, char* command) {
         const char* variable = ios_getenv([variable_string UTF8String]);
         if (variable) {
             // Okay, so this one exists.
-            NSString* replacement_string = [NSString stringWithCString:variable encoding:NSUTF8StringEncoding];
             variable_string = [[NSString stringWithCString:"$" encoding:NSUTF8StringEncoding] stringByAppendingString:variable_string];
+            NSString* replacement_string = [NSString stringWithCString:variable encoding:NSUTF8StringEncoding];
             argumentString = [argumentString stringByReplacingOccurrencesOfString:variable_string withString:replacement_string];
+            if ([replacement_string containsString:variable_string]) // avoid an infinite loop here
+                cannotExpand = true;
         } else cannotExpand = true; // found a variable we can't expand. stop trying for this argument
     }
     // 2) Tilde conversion: replace "~" with $HOME
@@ -680,6 +834,7 @@ static char* parseArgument(char* argument, char* command) {
         argumentString = [[variableName stringByAppendingString:@"="] stringByAppendingString:argumentString];
     }
     const char* newArgument = [argumentString UTF8String];
+    // NSLog(@"After parsing: %s", newArgument);
     if (strcmp(argument, newArgument) == 0) return argument; // nothing changed
     // Make sure the argument is reallocated, so it can be free-ed
     char* returnValue = realloc(argument, strlen(newArgument) + 1);
@@ -687,8 +842,58 @@ static char* parseArgument(char* argument, char* command) {
     return returnValue;
 }
 
+static const char* ios_expandFilename(const char *filename) {
+    // expand a filename for opening if it begins with "~" or contains an environment variable
+    if (strlen(filename) == 0) return filename;
+    NSString* nameString = [NSString stringWithUTF8String:filename];
+    if([nameString hasPrefix:@"~"]) {
+        // So it begins with "~". We can't use stringByExpandingTildeInPath because apps redefine HOME
+        NSString* replacement_string;
+        if (miniRoot == nil)
+            replacement_string = [NSString stringWithCString:(getenv("HOME")) encoding:NSUTF8StringEncoding];
+        else replacement_string = miniRoot;
+        if (([nameString hasPrefix:@"~/"]) || ([nameString length] == 1)) {
+            NSString* test_string = @"~";
+            nameString = [nameString stringByReplacingOccurrencesOfString:test_string withString:replacement_string options:NULL range:NSMakeRange(0, 1)];
+        } else {
+            // 2b) expand "~something" with the content of userPreference dictionary (to be set by each app)
+            NSDictionary *tildeExpansionDictionary = [[NSUserDefaults standardUserDefaults] dictionaryForKey:ios_bookmarkDictionaryName];
+            if (tildeExpansionDictionary != nil) {
+                NSCharacterSet* separators = [NSCharacterSet characterSetWithCharactersInString:@":/"];
+                NSArray<NSString*>* components = [nameString componentsSeparatedByCharactersInSet:separators];
+                NSString* name = [components[0] substringFromIndex:1]; // remove the "~"
+                NSString* expandedPath = tildeExpansionDictionary[name];
+                if (expandedPath != nil) {
+                    nameString = [nameString stringByReplacingOccurrencesOfString:components[0] withString:expandedPath options:NULL range:NSMakeRange(0, [components[0] length])];
+                }
+            }
+        }
+    }
+    bool cannotExpand = false;
+    while ([nameString containsString:@"$"] && !cannotExpand) {
+        // It has environment variables inside. Work on them one by one.
+        // position of first "$" sign:
+        NSRange r1 = [nameString rangeOfString:@"$"];
+        // position of first "/" after this $ sign:
+        NSRange r2 = [nameString rangeOfString:@"/" options:NULL range:NSMakeRange(r1.location + r1.length, [nameString length] - r1.location - r1.length)];
+        if (r2.location == NSNotFound)  r2.location = [nameString length];
+        
+        NSRange  rSub = NSMakeRange(r1.location + r1.length, r2.location - r1.location - r1.length);
+        NSString *variable_string = [nameString substringWithRange:rSub];
+        const char* variable = ios_getenv([variable_string UTF8String]);
+        if (variable) {
+            // Okay, so this one exists.
+            NSString* replacement_string = [NSString stringWithCString:variable encoding:NSUTF8StringEncoding];
+            variable_string = [[NSString stringWithCString:"$" encoding:NSUTF8StringEncoding] stringByAppendingString:variable_string];
+            nameString = [nameString stringByReplacingOccurrencesOfString:variable_string withString:replacement_string];
+        } else cannotExpand = true; // found a variable we can't expand. stop trying for this fileName
+    }
+    return [nameString UTF8String];
+}
 
-static void initializeCommandList()
+
+
+static void initializeCommandList(void)
 {
     // Loads command names and where to find them (digital library, function name) from plist dictionaries:
     //
@@ -787,24 +992,29 @@ int ios_setAllowedPaths(NSArray<NSString *> *paths) {
 }
 
 BOOL __allowed_cd_to_path(NSString *path) {
-  if (miniRoot == nil || [path hasPrefix:miniRoot]) {
-    return YES;
-  }
-  
+    // NSLog(@"__allowed_cd_to_path: %@ miniRoot: %@\n", path, miniRoot);
+    if (miniRoot == nil) {
+        return YES;
+    }
+    if ([path hasPrefix:miniRoot]) {
+        return YES;
+    }
     if (strlen(currentSession->localMiniRoot) != 0) {
         NSString *localMiniRootPath = [NSString stringWithCString:currentSession->localMiniRoot encoding:NSUTF8StringEncoding];
+        // NSLog(@"__allowed_cd_to_path: localMiniRoot: %s\n", localMiniRootPath);
         if (localMiniRootPath && [path hasPrefix:localMiniRootPath]) {
             return YES;
         }
     }
-  
-  for (NSString *dir in allowedPaths) {
-    if ([path hasPrefix:dir]) {
-      return YES;
+    
+    for (NSString *dir in allowedPaths) {
+        if ([path hasPrefix:dir]) {
+            return YES;
+        }
     }
-  }
-  
-  return NO;
+    // NSLog(@"__allowed_cd_to_path: failure, returning NO\n");
+    
+    return NO;
 }
 
 void __cd_to_dir(NSString *newDir, NSFileManager *fileManager) {
@@ -818,6 +1028,7 @@ void __cd_to_dir(NSString *newDir, NSFileManager *fileManager) {
     fprintf(thread_stderr, "cd: %s: not a directory\n", [newDir UTF8String]);
     return;
   }
+
   if (![fileManager isReadableFileAtPath:newDir] ||
       ![fileManager changeCurrentDirectoryPath:newDir]) {
     fprintf(thread_stderr, "cd: %s: permission denied\n", [newDir UTF8String]);
@@ -850,14 +1061,14 @@ void __cd_to_dir(NSString *newDir, NSFileManager *fileManager) {
 // For some Unix commands that call fchdir (including vim):
 #undef fchdir
 int ios_fchdir(const int fd) {
-    NSLog(@"Locking for thread %x in ios_fchdir\n", pthread_self());
+    // NSLog(@"Locking for thread %x in ios_fchdir\n", pthread_self());
     while (cleanup_counter > 0) { } // Don't chdir while a command is ending.
     // We cannot have someone change the current directory while a command is starting or terminating.
     // hence the mutex_lock here.
     pthread_mutex_lock(&pid_mtx);
     int result = fchdir(fd);
     if (result < 0) {
-        NSLog(@"Unlocking for thread %x in ios_fchdir\n", pthread_self());
+        // NSLog(@"Unlocking for thread %x in ios_fchdir\n", pthread_self());
         pthread_mutex_unlock(&pid_mtx);
         return result;
     }
@@ -866,13 +1077,13 @@ int ios_fchdir(const int fd) {
     // Allowed "cd" = below miniRoot *or* below localMiniRoot
     NSFileManager *fileManager = [[NSFileManager alloc] init];
     NSString* resultDir = [fileManager currentDirectoryPath];
-    NSLog(@"Inside fchdir, path: %s for session: %s\n", resultDir.UTF8String, (char*)currentSession->context);
+    // NSLog(@"Inside fchdir, path: %s for session: %s\n", resultDir.UTF8String, (char*)currentSession->context);
 
     if (__allowed_cd_to_path(resultDir)) {
         strcpy(currentSession->previousDirectory, currentSession->currentDir);
         strcpy(currentSession->currentDir, [resultDir UTF8String]);
         errno = 0;
-        NSLog(@"Unlocking for thread %x in ios_fchdir\n", pthread_self());
+        // NSLog(@"Unlocking for thread %x in ios_fchdir\n", pthread_self());
         pthread_mutex_unlock(&pid_mtx);
         return 0;
     }
@@ -887,12 +1098,13 @@ int ios_fchdir(const int fd) {
         // go back to where we were before:
         [fileManager changeCurrentDirectoryPath:[NSString stringWithCString:currentSession->currentDir encoding:NSUTF8StringEncoding]];
     }
-    NSLog(@"Unlocking for thread %x in ios_fchdir\n", pthread_self());
+    // NSLog(@"Unlocking for thread %x in ios_fchdir\n", pthread_self());
     pthread_mutex_unlock(&pid_mtx);
     return -1;
 }
 
 int ios_fchdir_nolock(const int fd) {
+    // NSLog(@"fchdir_nolock: %x thread %x\n", fd, pthread_self());
     // Same function as fchdir, except it does not lock. To be called when resetting directory after fork().
     while (cleanup_counter > 0) { } // Don't chdir while a command is ending.
     int result = fchdir(fd);
@@ -904,6 +1116,7 @@ int ios_fchdir_nolock(const int fd) {
     // Allowed "cd" = below miniRoot *or* below localMiniRoot
     NSFileManager *fileManager = [[NSFileManager alloc] init];
     NSString* resultDir = [fileManager currentDirectoryPath];
+    // NSLog(@"fchdir_nolock, success: %s\n", resultDir.UTF8String);
 
     if (__allowed_cd_to_path(resultDir)) {
         strcpy(currentSession->previousDirectory, currentSession->currentDir);
@@ -922,10 +1135,12 @@ int ios_fchdir_nolock(const int fd) {
         // go back to where we were before:
         [fileManager changeCurrentDirectoryPath:[NSString stringWithCString:currentSession->currentDir encoding:NSUTF8StringEncoding]];
     }
+    // NSLog(@"fchdir_nolock, failure\n");
     return -1;
 }
 
 int chdir_nolock(const char* path) {
+    // NSLog(@"chdir_nolock: %s thread %x\n", path, pthread_self());
     // Same function as chdir, except it does not lock. To be called from ios_releaseThread*()
     NSFileManager *fileManager = [[NSFileManager alloc] init];
     NSString* newDir = @(path);
@@ -949,9 +1164,15 @@ int chdir_nolock(const char* path) {
     // Was that allowed?
     // Allowed "cd" = below miniRoot *or* below localMiniRoot
     NSString* resultDir = [fileManager currentDirectoryPath];
+    if (resultDir == nil) {
+        resultDir = newDir;
+    }
 
     if (__allowed_cd_to_path(resultDir)) {
-        strcpy(currentSession->currentDir, [resultDir UTF8String]);
+        if (currentSession != NULL) {
+            strcpy(currentSession->currentDir, [resultDir UTF8String]);
+        }
+        NSLog(@"allowed directory change, returning\n");
         errno = 0;
         return 0;
     }
@@ -973,7 +1194,7 @@ int chdir_nolock(const char* path) {
 // Is also called at the end of the execution of each command
 int chdir(const char* path) {
     while (cleanup_counter > 0) { } // Don't chdir while a command is ending.
-    NSLog(@"Locking for thread %x in chdir, cd %s, stdin= %d\n", pthread_self(), path, fileno(thread_stdin));
+    // NSLog(@"Locking for thread %x in chdir, cd %s\n", pthread_self(), path);
     // We cannot have someone change the current directory while a command is starting or terminating.
     // hence the mutex_lock here.
     pthread_mutex_lock(&pid_mtx);
@@ -983,20 +1204,20 @@ int chdir(const char* path) {
     // Check for permission and existence:
     if (![fileManager fileExistsAtPath:newDir isDirectory:&isDir]) {
         errno = ENOENT; // No such file or directory
-        NSLog(@"Unlocking for thread %x in chdir\n", pthread_self());
+        // NSLog(@"Unlocking for thread %x in chdir (no such directory)\n", pthread_self());
         pthread_mutex_unlock(&pid_mtx);
         return -1;
     }
     if (!isDir) {
         errno = ENOTDIR; // Not a directory
-        NSLog(@"Unlocking for thread %x in chdir\n", pthread_self());
+        // NSLog(@"Unlocking for thread %x in chdir (not a directory)\n", pthread_self());
         pthread_mutex_unlock(&pid_mtx);
         return -1;
     }
     if (![fileManager isReadableFileAtPath:newDir] ||
         ![fileManager changeCurrentDirectoryPath:newDir]) {
         errno = EACCES; // Permission denied
-        NSLog(@"Unlocking for thread %x in chdir\n", pthread_self());
+        // NSLog(@"Unlocking for thread %x in chdir (not readable)\n", pthread_self());
         pthread_mutex_unlock(&pid_mtx);
         return -1;
     }
@@ -1005,16 +1226,22 @@ int chdir(const char* path) {
     // Was that allowed?
     // Allowed "cd" = below miniRoot *or* below localMiniRoot
     NSString* resultDir = [fileManager currentDirectoryPath];
+    // NSLog(@"After changing directory, result= %s\n", resultDir.UTF8String);
 
     if (__allowed_cd_to_path(resultDir)) {
-        strcpy(currentSession->currentDir, [resultDir UTF8String]);
-        NSLog(@"Unlocking for thread %x in chdir\n", pthread_self());
+        if (currentSession != NULL) {
+            strcpy(currentSession->currentDir, [resultDir UTF8String]);
+        }
+        // NSLog(@"Unlocking for thread %x in chdir (allowed)\n", pthread_self());
         pthread_mutex_unlock(&pid_mtx);
         errno = 0;
         return 0;
     }
     
     errno = EACCES; // Permission denied
+    if (currentSession == NULL) {
+        return -1   ;
+    }
     // If the user tried to go above the miniRoot, set it to miniRoot
     if ([miniRoot hasPrefix:resultDir]) {
         [fileManager changeCurrentDirectoryPath:miniRoot];
@@ -1024,9 +1251,20 @@ int chdir(const char* path) {
         // go back to where we were before:
         [fileManager changeCurrentDirectoryPath:[NSString stringWithCString:currentSession->currentDir encoding:NSUTF8StringEncoding]];
     }
-    NSLog(@"Unlocking for thread %x in chdir\n", pthread_self());
+    // NSLog(@"Unlocking for thread %lx in chdir (not allowed)\n", (unsigned long)pthread_self());
     pthread_mutex_unlock(&pid_mtx);
     return -1;
+}
+
+int too_many_scripts(int argc, char** argv) {
+    // Call an actual command in order to go through run_function / cleanup_function
+    // But not something as hardcore as causing a "Command not found" error:
+    if (currentSession->global_errno == 0) {
+        return 0; // show the warning only once for PythonNum commands stored:
+    }
+    fprintf(thread_stderr, "%s: too many scripts already running\n", argv[0]);
+    NSLog(@"%s: command not found\n", argv[0]);
+    return currentSession->global_errno;
 }
 
 int command_not_found(int argc, char** argv) {
@@ -1036,6 +1274,21 @@ int command_not_found(int argc, char** argv) {
     currentSession->global_errno = 127;
     return 127;
     // TODO: this should also raise an exception, for python scripts
+}
+
+int xcode_select(int argc, char** argv) {
+    // Replacement for xcode-select so config.guess scripts work
+    currentSession->global_errno = 1;
+    errno = 1;
+    return 1;
+}
+
+int sw_vers(int argc, char** argv) {
+    // Small command to make tlmgr happy
+    // tlmgr calls "sw_vers -productVersion". We return the latest OSX version, for simplicity
+    fprintf(thread_stdout, "11.5.2");
+    fflush(thread_stdout);
+    return 0;
 }
 
 extern void newPreviousDirectory(void);
@@ -1053,6 +1306,17 @@ int cd_main(int argc, char** argv) {
             newDir = @(currentSession->previousDirectory);
         }
         newDir = pathJoin(@(currentSession->currentDir), newDir);
+        // Store directory usage for autocomplete:
+        // It should not be a dictionary. NSArray? NSMutableArray?
+        // Need to store directoryname + number of times = sounds a lot like a Swift dictionary.
+        // But not Objective-C? Weird.
+        // Do it in Swift (new dictionary each time), then store it, then move to Objective-C?
+        void (*function)(NSString*) = NULL;
+        function = dlsym(RTLD_MAIN_ONLY, "storeDirectoryUsed");
+        if (function != NULL) {
+            NSString *key = @(ios_getBookmarkedVersion(newDir.UTF8String));
+            function(key);
+        }
         __cd_to_dir(newDir, fileManager);
     } else { // [cd] Help, I'm lost, bring me back home
         if (miniRoot != nil) {
@@ -1060,7 +1324,6 @@ int cd_main(int argc, char** argv) {
         } else {
             [fileManager changeCurrentDirectoryPath:[NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES) lastObject]];
         }
-
         strcpy(currentSession->previousDirectory, currentSession->currentDir);
         strcpy(currentSession->currentDir, fileManager.currentDirectoryPath.UTF8String);
     }
@@ -1100,12 +1363,16 @@ static __thread FILE* child_stdout = NULL;
 static __thread FILE* child_stderr = NULL;
 
 FILE* ios_popen(const char* inputCmd, const char* type) {
+    // NSLog(@"ios_popen: %s mode %s", inputCmd, type);
     // Save existing streams:
     int fd[2] = {0};
     const char* command = inputCmd;
     // skip past all spaces
     while ((command[0] == ' ') && strlen(command) > 0) command++;
     if (pipe(fd) < 0) { return NULL; } // Nothing we can do if pipe fails
+    // F_SETNOSIGPIPE: don't cause a signal 13 if the pipe is already closed
+    fcntl(fd[0], F_SETNOSIGPIPE);
+    fcntl(fd[1], F_SETNOSIGPIPE);
     // NOTES: fd[0] is set up for reading, fd[1] is set up for writing
     // fpout = fdopen(fd[1], "w");
     // fpin = fdopen(fd[0], "r");
@@ -1207,7 +1474,6 @@ static char* concatenateArgv(char* const argv[]) {
     while(argv[argc] != NULL) { cmdLength += strlen(argv[argc]) + 1; argc++;}
     if (argc == 0) return NULL; // safeguard check
     char* cmd = malloc((cmdLength  + 3 * argc + 1) * sizeof(char)); // space for quotes
-    NSLog(@"Command allocated: %d ", cmdLength  + 3 * argc + 1);
     strcpy(cmd, argv[0]);
     argc = 1;
     char recordSeparator = 0x1e;
@@ -1243,20 +1509,23 @@ static char* concatenateArgv(char* const argv[]) {
         strcat(cmd, argv[argc]);
         argc++;
     }
-    NSLog(@"Command length: %d ", strlen(cmd));
     return cmd;
 }
 
 int pbpaste(int argc, char** argv) {
-    // We can paste strings and URLs.
-    if ([UIPasteboard generalPasteboard].hasStrings) {
-        fprintf(thread_stdout, "%s", [[UIPasteboard generalPasteboard].string UTF8String]);
-        if (![[UIPasteboard generalPasteboard].string hasSuffix:@"\n"]) fprintf(thread_stdout, "\n");
-        return 0;
-    }
-    if ([UIPasteboard generalPasteboard].hasURLs) {
-        fprintf(thread_stdout, "%s\n", [[[UIPasteboard generalPasteboard].URL absoluteString] UTF8String]);
-        return 0;
+    if (argc == 1) {
+        // We can paste strings and URLs.
+        if ([UIPasteboard generalPasteboard].hasStrings) {
+            fprintf(thread_stdout, "%s", [[UIPasteboard generalPasteboard].string UTF8String]);
+            if (![[UIPasteboard generalPasteboard].string hasSuffix:@"\n"]) fprintf(thread_stdout, "\n");
+            return 0;
+        }
+        if ([UIPasteboard generalPasteboard].hasURLs) {
+            fprintf(thread_stdout, "%s\n", [[[UIPasteboard generalPasteboard].URL absoluteString] UTF8String]);
+            return 0;
+        }
+    } else {
+        fprintf(thread_stderr, "Usage: pbpaste\nPastes the content of the copy buffer (strings or urls).");
     }
     return 1;
 }
@@ -1282,6 +1551,10 @@ int pbcopy(int argc, char** argv) {
         
         [UIPasteboard generalPasteboard].string = result;
     } else {
+        if ((argv[1][0] == '-') && ((strcmp(argv[1], "-h") == 0) || (strcmp(argv[1], "--help") == 0))) {
+            fprintf(thread_stderr, "Usage: pbcopy arguments\ncommand > pbcopy\nCopies either its arguments or input to the copy buffer.");
+            return 0;
+        }
         // threre are arguments, concatenate and paste:
         char* cmd = concatenateArgv(argv + 1);
         [UIPasteboard generalPasteboard].string = @(cmd);
@@ -1336,13 +1609,14 @@ int alias_main(int argc, char** argv) {
     if ((equalSign == NULL) && (argc == 2)) {
         // single command, show alias:
         command =  [NSString stringWithCString:argv[1] encoding:NSUTF8StringEncoding];
+        NSLog(@"Extracting alias for command %s = %@.", argv[1], command);
         NSArray<NSString*>* aliasArray = aliasDictionary[command];
         if (aliasArray == nil) { return 0; }
-        fprintf(thread_stdout, "%s", aliasArray[0]);
+        fprintf(thread_stdout, "%s", aliasArray[0].UTF8String);
         if ([aliasArray[2] isEqualToString: @"afterFirst"]) {
-            fprintf(thread_stdout, " !^ %s", aliasArray[1]);
+            fprintf(thread_stdout, " !^ %s", aliasArray[1].UTF8String);
         } else if ([aliasArray[2] isEqualToString: @"afterLast"]) {
-            fprintf(thread_stdout, " !* %s", aliasArray[1]);
+            fprintf(thread_stdout, " !* %s  ", aliasArray[1].UTF8String);
         }
         fprintf(thread_stdout, "\n");
         return 0;
@@ -1510,7 +1784,7 @@ static int splitCommandAndExecute(char* command) {
             ios_waitpid(pid);
             break;
         }
-        int nextCommandPosition = 0;
+        long nextCommandPosition = 0;
         bool andNextCommand = false;
         if (nextAnd != NULL) {
             nextCommandPosition = nextAnd - command;
@@ -1522,10 +1796,10 @@ static int splitCommandAndExecute(char* command) {
                 andNextCommand = false;
             }
         }
-        command[nextCommandPosition] = NULL; // terminate string
+        command[nextCommandPosition] = 0; // terminate string
         pid_t pid = ios_fork();
         returnValue = ios_system(command);
-        // NSLog(@"Started command (2), stored last_thread= %x", currentSession->lastThreadId);
+        NSLog(@"Started command (2), stored last_thread= %x", currentSession->lastThreadId);
         ios_waitpid(pid);
         if (andNextCommand && (returnValue != 0)) {
             // && + the command returned error, we return:
@@ -1566,7 +1840,7 @@ int sh_main(int argc, char** argv) {
         char* position = strstrquoted(command[0],"=");
         if (position == NULL) { break; }
         char* firstSpace = strstrquoted(command[0]," ");
-        if (firstSpace < position) { break; }
+        if ((firstSpace!=NULL) && (firstSpace < position)) { break; }
         firstSpace = strstrquoted(position," ");
         if (firstSpace != NULL) { *firstSpace = 0; }
         *position = 0;
@@ -1608,6 +1882,7 @@ int sh_main(int argc, char** argv) {
         sessionParameters* runningShellSession = (sessionParameters*)[[sessionList objectForKey: sessionKey] pointerValue];
         if (runningShellSession != NULL) {
             if ((runningShellSession->lastThreadId != 0) && (runningShellSession->lastThreadId != pthread_self())) {
+                fprintf(thread_stderr, "Sorry, you cannot run sh while another sh command is running\n");
                 NSLog(@"There is another sh session running: last_thread= %x", runningShellSession->lastThreadId);
                 argv[0][0] = 'h'; // prevent termination in cleanup_function
                 return 1;
@@ -1677,7 +1952,6 @@ int sh_main(int argc, char** argv) {
 
 
 int ios_execv(const char *path, char* const argv[]) {
-    // TODO: store new environment if current process has already stored some. 
     // path and argv[0] are the same (not in theory, but in practice, since Python wrote the command)
     // start "child" with the child streams:
     char* cmd = concatenateArgv(argv);
@@ -1695,7 +1969,7 @@ int ios_execve(const char *path, char* const argv[], char* envp[]) {
 }
 
 extern char** environmentVariables(pid_t pid);
-NSArray* environmentAsArray() {
+NSArray* environmentAsArray(void) {
     char** env_pid = environmentVariables(ios_currentPid());
     NSMutableArray<NSString*> *dictionary = [[NSMutableArray alloc]init];
     int i = 0;
@@ -1707,7 +1981,7 @@ NSArray* environmentAsArray() {
     return [dictionary copy];
 }
 
-pthread_t ios_getLastThreadId() {
+pthread_t ios_getLastThreadId(void) {
     if (!currentSession) return nil;
     return (currentSession->lastThreadId);
 }
@@ -1729,6 +2003,7 @@ pthread_t ios_getLastThreadId() {
 
 int ios_dup2(int fd1, int fd2)
 {
+    NSLog(@"ios_dup2: %d %d", fd1, fd2);
     // iOS specifics: trying to access stdin/stdout/stderr?
     if (fd1 < 3) {
         // specific cases like dup2(STDOUT_FILENO, STDERR_FILENO)
@@ -1739,16 +2014,39 @@ int ios_dup2(int fd1, int fd2)
             case 2: stream1 = child_stderr; break;
         }
         switch (fd2) {
-            case 0: child_stdin = stream1; return fd2;
-            case 1: child_stdout = stream1; return fd2;
-            case 2: child_stderr = stream1; return fd2;
+            case 0:
+                if (stream1 != NULL) {
+                    child_stdin = stream1; return fd2;
+                } else break;
+            case 1:
+                if (stream1 != NULL) {
+                    child_stdout = stream1; return fd2;
+                } else break;
+            case 2:
+                if (stream1 != NULL) {
+                    child_stderr = stream1; return fd2;
+                } else break;
         }
     }
-    if ((fd2 == 0) || (thread_stdin != NULL && fd2 == fileno(thread_stdin))) { child_stdin = fdopen(fd1, "rb"); }
-    else if ((fd2 == 1) || (thread_stdout != NULL && fd2 == fileno(thread_stdout))) { child_stdout = fdopen(fd1, "wb"); }
-    else if ((fd2 == 2) || (thread_stderr != NULL && fd2 == fileno(thread_stderr))) {
+    // We can have fileno(thread_stdin) == 1. Most likely fd2 == 1 means stdout in that case.
+    if (fd2 == 0) {
+        child_stdin = fdopen(fd1, "rb");
+    } else if (fd2 == 1) {
+        child_stdout = fdopen(fd1, "wb");
+    } else if (fd2 == 2) {
         if ((child_stdout != NULL) && (fileno(child_stdout) == fd1)) child_stderr = child_stdout;
-        else child_stderr = fdopen(fd1, "wb"); }
+        if ((thread_stdout != NULL) && (fileno(thread_stdout) == fd1)) child_stderr = child_stdout;
+        else if (fd1 == 1) {
+            child_stderr = thread_stdout;
+        } else child_stderr = fdopen(fd1, "wb");
+    } else if (thread_stdin != NULL && fd2 == fileno(thread_stdin)) {
+        child_stdin = fdopen(fd1, "rb");
+    } else if (thread_stdout != NULL && fd2 == fileno(thread_stdout)) {
+        child_stdout = fdopen(fd1, "wb");
+    } else if (thread_stderr != NULL && fd2 == fileno(thread_stderr)) {
+        if ((child_stdout != NULL) && (fileno(child_stdout) == fd1)) child_stderr = child_stdout;
+        else child_stderr = fdopen(fd1, "wb");
+    }
     else if (fd1 != fd2) {
         if (fcntl(fd1, F_GETFL) < 0)
             return -1;
@@ -1760,7 +2058,31 @@ int ios_dup2(int fd1, int fd2)
     return fd2;
 }
 
-int ios_kill()
+/* Normally, a command that wants to send output to different streams calls dup2, then fork and exec.
+   ios_system() is ready for that. Sometimes, command (eg in dash) just call dup2 and expect the
+   output to be redirected. This function sends the result of dup2 to stdin, stdout, stderr and stores
+   the previous streams so they can be restored later.
+ */
+
+void ios_activateChildStreams(FILE** old_stdin, FILE** old_stdout,  FILE ** old_stderr) {
+    if (child_stdin != NULL) {
+        *old_stdin = thread_stdin;
+        thread_stdin = child_stdin;
+        child_stdin = NULL;
+    }
+    if (child_stdout != NULL) {
+        *old_stdout = thread_stdout;
+        thread_stdout = child_stdout;
+        child_stdout = NULL;
+    }
+    if (child_stderr != NULL) {
+        *old_stderr = thread_stderr;
+        thread_stderr = child_stderr;
+        child_stderr = NULL;
+    }
+}
+
+int ios_kill(void)
 {
     if (currentSession == NULL) return ESRCH;
     if (currentSession->current_command_root_thread > 0) {
@@ -1771,11 +2093,13 @@ int ios_kill()
             /* A programmer-defined signal handler is in effect. */
             // This might be problematic with multiple commands running at the same time that all define SIGINT
             // ...such as ls.
+            // !! this is called from the main thread. So make sure the signal handler does *not* call phtread_exit();
             query_action.sa_handler(SIGINT);
             // kill(getpid(), SIGINT); // infinite loop?
         } else {
             // Send pthread_cancel with the given signal to the current main thread, if there is one.
-            return pthread_cancel(currentSession->current_command_root_thread);
+            if (currentSession->current_command_root_thread != NULL)
+                return pthread_cancel(currentSession->current_command_root_thread);
         }
     }
     // No process running
@@ -1879,40 +2203,45 @@ void ios_settty(FILE* _tty) {
     currentSession->tty = _tty;
 }
 
-int ios_gettty() {
+int ios_gettty(void) {
     if (currentSession == NULL) return -1;
     if (currentSession->tty == NULL) return -1;
     return fileno(currentSession->tty);
 }
 
 // Allows commands that are not usually tty-based to get the tty (for password input in ssh/scp/sftp):
-int ios_opentty() {
+int ios_opentty(void) {
     if (currentSession == nil) { return -1; }
-    currentSession->activePager = true;
     if (currentSession->tty == NULL) return -1;
+    currentSession->activePager = true;
     return fileno(currentSession->tty);
 }
 
-void ios_closetty() {
+void ios_closetty(void) {
     if (currentSession == nil) { return; }
     currentSession->activePager = false;
 }
 
-int ios_activePager() {
+int ios_activePager(void) {
     // All commands that read from tty instead of stdin:
     if (currentSession == nil) { return 0; }
-    if ((strcmp(currentSession->commandName, "less") == 0) ||
-        (strcmp(currentSession->commandName, "more") == 0)) {
+    char* currentSessionCommandName;
+    if (currentSession->numCommand <= 0)
+        currentSessionCommandName = currentSession->commandName[0];
+    else
+        currentSessionCommandName = currentSession->commandName[currentSession->numCommand - 1];
+    if ((strcmp(currentSessionCommandName, "less") == 0) ||
+        (strcmp(currentSessionCommandName, "more") == 0)) {
         return 1;
     }
     if (currentSession->activePager) { return 1; }
     return 0;
 }
 
-void ios_stopInteractive() {
+void ios_stopInteractive(void) {
     // Some commands, like sftp, start as "interactive" (they handle all input), then become non-interactive (they let the shell handle input)
     // This could be merged with opentty / closetty above, but stopInteractive involves one more trip to WKWebView->evaluateJS, so it's better not to call it too often.
-    void (*function)() = NULL;
+    void (*function)(void) = NULL;
     function = dlsym(RTLD_MAIN_ONLY, "stopInteractive");
     if (function != NULL) {
         function();
@@ -1921,7 +2250,19 @@ void ios_stopInteractive() {
     }
 }
 
-void ios_startInteractive() {
+int ios_storeInteractive(void) {
+    // Some commands, like dash, can be started from inside interactive or non-interactive commands. They need to restore the status afterwards.
+    int (*function)(void) = NULL;
+    function = dlsym(RTLD_MAIN_ONLY, "storeInteractive");
+    if (function != NULL) {
+        return function();
+    } else {
+        NSLog(@"Could not find function storeInteractive");
+        return 0;
+    }
+}
+
+void ios_startInteractive(void) {
     // With aliasing, we can have commands that are interactive and not detected by the command-line interpreter.
     void (*function)() = NULL;
     function = dlsym(RTLD_MAIN_ONLY, "startInteractive");
@@ -1933,11 +2274,14 @@ void ios_startInteractive() {
 }
 
 static int isInteractive(const char* command) {
-    // let interactiveRegexp = /^vim|^ipython|^less|^more|^ssh|^scp|^sftp|^jump|\|&? *less|\|&? *more|^man/;
+    // let interactiveRegexp = /^vim|^ipython|^less|^more|^ssh|^scp|^sftp|^jump|\|&? *less|\|&? *more|^man|^pico/;
     if (strncmp(command, "vim", 3) == 0) return true;
+    if (strncmp(command, "pico", 4) == 0) return true;
     if (strncmp(command, "ipython", 7) == 0) return true;
+    if (strncmp(command, "isympy", 6) == 0) return true;
     if (strncmp(command, "less", 4) == 0) return true;
     if (strncmp(command, "more", 4) == 0) return true;
+    if (strncmp(command, "ssh", 3) == 0) return true;
     if (strncmp(command, "scp", 3) == 0) return true;
     if (strncmp(command, "man", 3) == 0) return true;
     if (strncmp(command, "sftp", 4) == 0) return true;
@@ -1950,9 +2294,12 @@ void ios_setContext(const void *context) {
     currentSession->context = context;
 }
 
-void* ios_getContext() {
+void* ios_getContext(void) {
     if (currentSession == NULL) return NULL;
-    return currentSession->context;
+    if (currentSession->context != sh_session)
+        return currentSession->context;
+    else
+        return parentSession->context;
 }
 
 
@@ -2029,7 +2376,7 @@ NSError* addCommandList(NSString* fileLocation) {
 }
 
 
-NSString* commandsAsString() {
+NSString* commandsAsString(void) {
     
     if (commandList == nil) initializeCommandList();
     
@@ -2040,7 +2387,7 @@ NSString* commandsAsString() {
     return myString;
 }
 
-NSArray* commandsAsArray() {
+NSArray* commandsAsArray(void) {
     if (commandList == nil) initializeCommandList();
     return commandList.allKeys;
 }
@@ -2092,7 +2439,9 @@ static char* getLastCharacterOfArgument(const char* argument) {
                 write[0] = 0;
                 return getLastCharacterOfArgument(endquote + 1);
             }
-            return endquote + 1;
+            // After quote non space character, we should continue till space:
+            // `ssh "user name"@localhost`
+            return nextUnescapedCharacter(endquote + 1, ' ');
         }
         return NULL;
     } else if (argument[0] == '\'') {
@@ -2112,11 +2461,14 @@ static char* getLastCharacterOfArgument(const char* argument) {
                 write[0] = 0;
                 return getLastCharacterOfArgument(endquote);
             }
-            return endquote + 1;
+            // After quote non space character, we should continue till space
+            // `ssh "user name"@localhost`
+            return nextUnescapedCharacter(endquote + 1, ' ');
         }
         return NULL;
     } else if (argument[0] == recordSeparator) {
         char* endquote = strchr(argument + 1, recordSeparator);
+        if (endquote == NULL) return NULL; // be safe (see #153)
         return endquote + 1;
     }
     // TODO: the last character of the argument could also be '<' or '>' (vim does that, with no space after file name)
@@ -2184,8 +2536,91 @@ static int isRealCommand(const char* fileName) {
     return returnValue;
 }
 
+static bool isBackgroundCommand(char* command) {
+    if (backgroundCommandList == nil) {
+        return false;
+    }
+    if (command == NULL) {
+        return false;
+    }
+    NSString *commandAsString = [NSString stringWithUTF8String: command];
+    for (NSString* commandInList in backgroundCommandList) {
+        if ([commandInList isEqualToString: commandAsString]) {
+            // NSLog(@"%s is a backgroundCommand\n", command);
+            return true;
+        }
+        if ([commandInList hasSuffix:@"*"]) {
+            NSString* shortCommand = commandInList;
+            shortCommand = [shortCommand substringToIndex:[shortCommand length] - 1];
+            while ([shortCommand hasSuffix:@" "]) {
+                shortCommand = [shortCommand substringToIndex:[shortCommand length] - 1];
+            }
+            if ([commandAsString hasPrefix: shortCommand]) {
+                // NSLog(@"%s is a backgroundCommand\n", command);
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
+NSString* beforeScriptCommandName(NSString* scriptName) {
+    // scans the PATH for a binary that has the name script and non-null size,
+    // checks whether it has wasm signature, if so insert "wasm" before script name.
+    BOOL isDir = false;
+    NSFileManager *fileManager = [[NSFileManager alloc] init];
+    directoriesInPath = [fullCommandPath componentsSeparatedByString:@":"];
+    for (NSString* path in directoriesInPath) {
+        // If we don't have access to the path component, there's no point in continuing:
+        if (![fileManager fileExistsAtPath:path isDirectory:&isDir]) continue;
+        if (!isDir) continue; // same in the (unlikely) event the path component is not a directory
+        NSString* locationName;
+        // search for 2 possibilities: name and name.wasm
+        locationName = [path stringByAppendingPathComponent:scriptName];
+        bool fileFound = [fileManager fileExistsAtPath:locationName isDirectory:&isDir];
+        fileFound = fileFound && !isDir;
+        if (!fileFound) {
+            locationName = [[path stringByAppendingPathComponent:scriptName] stringByAppendingString:@".wasm"];
+            fileFound = [fileManager fileExistsAtPath:locationName isDirectory:&isDir];
+            fileFound = fileFound && !isDir;
+        }
+        if (!fileFound) continue;
+        // isExecutableFileAtPath replies "NO" even if file has x-bit set.
+        // if (![fileManager  isExecutableFileAtPath:cmdname]) continue;
+        struct stat sb;
+        // Files inside the Application Bundle will always have "x" removed. Don't check.
+        if (!([path containsString: [[NSBundle mainBundle] resourcePath]]) // Not inside the App Bundle
+            && !((stat(locationName.UTF8String, &sb) == 0))) // file exists, is not a directory
+            continue;
+        // At this point the file exists, is a file.
+        if (!isRealCommand(locationName.UTF8String)) // if it's one of our fake commands, search is over.
+            return NULL;
+        NSData *data = [NSData dataWithContentsOfFile:locationName]; // You have the data. Conversion to String probably failed.
+        NSString *fileContent = [[NSString alloc]initWithData:data encoding:NSUTF8StringEncoding];
+        if ((fileContent == nil) && (data.length > 0)) {
+            // Conversion to string failed with UTF8. Try with Ascii as a backup:
+            fileContent =  [[NSString alloc]initWithData:data encoding:NSASCIIStringEncoding];
+        }
+        NSString* signature;
+        // Detect WebAssembly file signature: '\0asm' (begins with 0, so not a string)
+        if ((data.length >0) && (((char*)data.bytes)[0] == 0)) {
+            // fileContent = [[NSString alloc]initWithData:data encoding:NSASCIIStringEncoding];
+            NSRange signatureRange = NSMakeRange(1, 3);
+            signature = [fileContent substringWithRange:signatureRange];
+        }
+        if ([signature isEqualToString:@"asm"]) {
+            return [@"wasm " stringByAppendingString:locationName];
+        }
+    }
+    // We didn't find anything, no change to scriptName
+    return NULL;
+}
+
+
+
 int ios_system(const char* inputCmd) {
     NSLog(@"command= %s pid= %d\n", inputCmd, ios_currentPid());
+
     char* command;
     // The names of the files for stdin, stdout, stderr
     char* inputFileName = 0;
@@ -2206,6 +2641,7 @@ int ios_system(const char* inputCmd) {
         initSessionParameters(currentSession);
     }
     currentSession->global_errno = 0;
+    NSLog(@"Starting command: %s currentSession->isMainThread: %d", inputCmd, currentSession->isMainThread);
     // Don't start if the command is NULL:
     if (inputCmd == NULL) {
         ios_storeThreadId(0);
@@ -2275,13 +2711,13 @@ int ios_system(const char* inputCmd) {
                 if (firstSpace == NULL) {
                     newCommand = strdup(aliasedCommand[0].UTF8String);
                 } else {
-                    int newCommandLength = aliasedCommand[0].length + 2 + strlen(firstSpace+1);
+                    unsigned long newCommandLength = aliasedCommand[0].length + 2 + strlen(firstSpace+1);
                     // + 2: 1 for space, 1 for NULL termination
                     newCommand = malloc(newCommandLength * sizeof(char));
                     sprintf(newCommand, "%s %s", aliasedCommand[0].UTF8String, firstSpace+1);
                 }
             } else if ([aliasedCommand[2] isEqualToString: @"afterLast"]) {
-                int newCommandLength = aliasedCommand[0].length + 2 + aliasedCommand[1].length;
+                unsigned long newCommandLength = aliasedCommand[0].length + 2 + aliasedCommand[1].length;
                 // + 2: 1 for space, 1 for NULL termination
                 if (firstSpace == NULL) { // no arguments
                     newCommand = malloc(newCommandLength * sizeof(char));
@@ -2292,7 +2728,7 @@ int ios_system(const char* inputCmd) {
                     sprintf(newCommand, "%s %s %s", aliasedCommand[0].UTF8String, firstSpace+1, aliasedCommand[1].UTF8String);
                 }
             } else if ([aliasedCommand[2] isEqualToString: @"afterFirst"]) {
-                int newCommandLength = aliasedCommand[0].length + 2 + aliasedCommand[1].length;
+                unsigned long newCommandLength = aliasedCommand[0].length + 2 + aliasedCommand[1].length;
                 // + 2: 1 for space, 1 for NULL termination
                 if (firstSpace == NULL) { // no arguments
                     newCommand = malloc(newCommandLength * sizeof(char));
@@ -2320,14 +2756,14 @@ int ios_system(const char* inputCmd) {
                 originalCommand = newCommand;
                 cmd = newCommand;
                 command = newCommand;
-                // Maybe we aliased to an interactive command (vim, ssh, less, more, man, scp, sftp)
-                // We need to tell the command line editor:
-                if (isInteractive(newCommand)) {
-                    ios_startInteractive();
-                }
             }
         }
         free(commandForParsing);
+    }
+    // Maybe we aliased to an interactive command (vim, ssh, less, more, man, scp, sftp)
+    // We need to tell the command line editor:
+    if (isInteractive(command)) {
+        ios_startInteractive();
     }
     // NSLog(@"command after alias expansion= %s\n", command);
     // Search for input, output and error redirection
@@ -2343,6 +2779,8 @@ int ios_system(const char* inputCmd) {
     params->stdout = child_stdout;
     params->stderr = child_stderr;
     params->session = currentSession;
+    params->backgroundCommand = isBackgroundCommand(command);
+    params->numInterpreter = 0;
 
     params->context = thread_context;
   
@@ -2357,9 +2795,21 @@ int ios_system(const char* inputCmd) {
         inputFileMarker = strstrquoted(inputFileMarker, "<");
         // scan until first non-space character:
         if (inputFileMarker) {
-            inputFileName = inputFileMarker + 1; // skip past '<'
-            // skip past all spaces
-            while ((inputFileName[0] == ' ') && strlen(inputFileName) > 0) inputFileName++;
+            if ((strlen(inputFileMarker) > 1) && (inputFileMarker[1] == '=')) {
+                // >= (used by pip install, e.g. "setuptools<=56"
+                // This is very specific. pip needs it, other commands act differently.
+                char* doubleDashMarker = strstrquoted(command, " -- ");
+                // Is there a double dash before the ">="? If not keep going.
+                if (!doubleDashMarker || (doubleDashMarker > inputFileMarker)) {
+                    inputFileName = inputFileMarker + 1; // skip past '<'
+                }
+            } else {
+                inputFileName = inputFileMarker + 1; // skip past '<'
+            }
+            if (inputFileName) {
+                // skip past all spaces
+                while ((inputFileName[0] == ' ') && strlen(inputFileName) > 0) inputFileName++;
+            }
         }
         // is there a pipe ("|", "&|" or "|&")
         // We assume here a logical command order: < before pipe, pipe before >.
@@ -2444,6 +2894,14 @@ int ios_system(const char* inputCmd) {
                 if ((strlen(outputFileMarker) > 1) && (outputFileMarker[1] == '>')) { // >>
                     outputFileName = outputFileMarker + 2; // skip past ">>"
                     appendToFileName = true;
+                } else if ((strlen(outputFileMarker) > 1) && (outputFileMarker[1] == '=')) {
+                    // >= (used by pip install, e.g. "setuptools>=56,!=61.0.0"
+                    // This is very specific. pip needs it, other commands act differently.
+                    char* doubleDashMarker = strstrquoted(command, " -- ");
+                    // Is there a double dash before the ">="? If not keep going.
+                    if (!doubleDashMarker || (doubleDashMarker > outputFileMarker)) {
+                        outputFileName = outputFileMarker + 1; // skip past '>'
+                    } // Otherwise do nothing
                 } else {
                     outputFileName = outputFileMarker + 1; // skip past '>'
                 }
@@ -2497,16 +2955,17 @@ int ios_system(const char* inputCmd) {
         //
         FILE* newStream;
         if (inputFileName) {
-            newStream = fopen(inputFileName, "r");
+            newStream = fopen(ios_expandFilename(inputFileName), "r");
             if (newStream) params->stdin = newStream;
         }
         if (params->stdin == NULL) params->stdin = thread_stdin;
         if (outputFileName) {
             if (appendToFileName) {
-                newStream = fopen(outputFileName, "a"); // append
+                newStream = fopen(ios_expandFilename(outputFileName), "a"); // append
             } else {
-                newStream = fopen(outputFileName, "w");
+                newStream = fopen(ios_expandFilename(outputFileName), "w");
             }
+            NSLog(@"Opened %s as output file: %x", outputFileName, newStream);
             if (newStream) {
                 if (params->stdout != NULL) {
                     if (fileno(params->stdout) != fileno(currentSession->stdout)) fclose(params->stdout);
@@ -2523,7 +2982,7 @@ int ios_system(const char* inputCmd) {
         }
         else if (errorFileName) {
             newStream = NULL;
-            newStream = fopen(errorFileName, "w");
+            newStream = fopen(ios_expandFilename(errorFileName), "w");
             if (newStream) {
                 if (params->stderr != NULL) {
                     if (fileno(params->stderr) != fileno(currentSession->stderr)) fclose(params->stderr);
@@ -2533,6 +2992,9 @@ int ios_system(const char* inputCmd) {
         }
         if (params->stderr == NULL) params->stderr = thread_stderr;
     } // recordSeparator != NULL
+    if (params->stdin == NULL) params->stdin = thread_stdin;
+    if (params->stdout == NULL) params->stdout = thread_stdout;
+    if (params->stderr == NULL) params->stderr = thread_stderr;
     int argc = 0;
     size_t numSpaces = 0;
     // the number of arguments is *at most* the number of spaces plus one
@@ -2546,6 +3008,7 @@ int ios_system(const char* inputCmd) {
         argv[argc] = str;
         dontExpand[argc] = false;
         argc += 1;
+        if ((argc == 2) && (strcmp(argv[0], "export") == 0)) break; // don't try to unquote the argument of export.
         char* end = getLastCharacterOfArgument(str);
         bool mustBreak = (end == NULL) || (strlen(end) == 0);
         if (!mustBreak) end[0] = 0x0;
@@ -2613,7 +3076,23 @@ int ios_system(const char* inputCmd) {
             memmove(argv[0], argv[0] + 1, len_with_terminator);
         } else  {
             NSString* commandName = [NSString stringWithCString:argv[0]  encoding:NSUTF8StringEncoding];
-            strcpy(currentSession->commandName, argv[0]);
+            // strcpy(currentSession->commandName, argv[0]);
+            // store into heap:
+            if ((currentSession->numCommand <= 0) && (strlen(currentSession->commandName[0]) == 0)) {
+                strcpy(currentSession->commandName[0], argv[0]);
+                currentSession->numCommand = 1;
+            } else {
+                if (currentSession->numCommand >= currentSession->numCommandsAllocated) {
+                    int oldCommandsAllocated = currentSession->numCommandsAllocated;
+                    currentSession->numCommandsAllocated += 10;
+                    currentSession->commandName = realloc(currentSession->commandName, sizeof(char*) * currentSession->numCommandsAllocated);
+                    for (int i = oldCommandsAllocated; i < currentSession->numCommandsAllocated; i++) {
+                        currentSession->commandName[i] = malloc(sizeof(char) * NAME_MAX);
+                    }
+                }
+                strcpy(currentSession->commandName[currentSession->numCommand], argv[0]);
+                currentSession->numCommand += 1;
+            }
             BOOL isDir = false;
             bool cmdIsAFile = false;
             bool cmdIsReal = false;
@@ -2649,24 +3128,24 @@ int ios_system(const char* inputCmd) {
                     if (!isDir) continue; // same in the (unlikely) event the path component is not a directory
                     NSString* locationName;
                     if (!cmdIsAFile) {
-                        // search for 3 possibilities: name, name.bc and name.ll
+                        // search for 4 possibilities: name, name.bc, name.ll and name.wasm
                         locationName = [path stringByAppendingPathComponent:commandName];
                         bool fileFound = [fileManager fileExistsAtPath:locationName isDirectory:&isDir];
-                        if (fileFound && isDir) continue; // file exists, but is a directory
+                        fileFound = fileFound && !isDir;
                         if (!fileFound) {
                             locationName = [[path stringByAppendingPathComponent:commandName] stringByAppendingString:@".bc"];
                             fileFound = [fileManager fileExistsAtPath:locationName isDirectory:&isDir];
-                            if (fileFound && isDir) continue; // file exists, but is a directory
+                            fileFound = fileFound && !isDir;
                         }
                         if (!fileFound) {
                             locationName = [[path stringByAppendingPathComponent:commandName] stringByAppendingString:@".ll"];
                             fileFound = [fileManager fileExistsAtPath:locationName isDirectory:&isDir];
-                            if (fileFound && isDir) continue; // file exists, but is a directory
+                            fileFound = fileFound && !isDir;
                         }
                         if (!fileFound) {
                             locationName = [[path stringByAppendingPathComponent:commandName] stringByAppendingString:@".wasm"];
                             fileFound = [fileManager fileExistsAtPath:locationName isDirectory:&isDir];
-                            if (fileFound && isDir) continue; // file exists, but is a directory
+                            fileFound = fileFound && !isDir;
                         }
                         if (!fileFound) continue;
                         // isExecutableFileAtPath replies "NO" even if file has x-bit set.
@@ -2724,18 +3203,36 @@ int ios_system(const char* inputCmd) {
                                 // The last word of the line is the command. This covers all of the cases encountered:
                                 // "#! /usr/bin/python", "#! /usr/local/bin/python" and "#! /usr/bin/myStrangePath/python" are all OK.
                                 // We also accept "#! /usr/bin/env python" because it is used.
+                                // Special case: scripts that begin with "#! /bin/sh" will be executed with dash
                                 // And we want to accept "#! bc -l" too, so we can have multiple arguments.
                                 // Take alphanumericCharacterSet and invert it.
                                 firstLine = [firstLine substringFromIndex:2]; // remove "#!" at the beginning
                                 firstLine = [firstLine stringByTrimmingCharactersInSet: [NSCharacterSet whitespaceCharacterSet]]; // remove any extra space
-                                NSArray<NSString*> *components = [firstLine componentsSeparatedByCharactersInSet:[NSCharacterSet whitespaceCharacterSet]];
-                                unsigned long numComponents = components.count;
-                                int start = 0;
+                                
+                                NSArray<NSString*> *firstLineComponents = [firstLine componentsSeparatedByCharactersInSet:[NSCharacterSet whitespaceCharacterSet]];
+                                NSMutableArray<NSString*> *components = [firstLineComponents mutableCopy];
                                 if ([components.firstObject hasSuffix:@"env"]) {
                                     // /usr/bin/env <command>
-                                    start = 1;
-                                    numComponents -= 1;
+                                    [components removeObjectAtIndex:0];
                                 }
+                                // Extract stript name by removing the path:
+                                NSString* scriptNameString = components[0];
+                                NSCharacterSet* separators = [NSCharacterSet characterSetWithCharactersInString:@"/"];
+                                NSArray<NSString*> *scriptComponents = [scriptNameString componentsSeparatedByCharactersInSet:separators];
+                                scriptNameString = scriptComponents.lastObject;
+                                if ([scriptNameString isEqualToString:@"sh"])
+                                    scriptNameString = @"dash";
+                                if ([scriptNameString isEqualToString:@"node"])
+                                    scriptNameString = @"jsc";
+                                // If scriptNameString is a file that exists in PATH and has webAssembly signature, then insert "wasm script". Other cases?
+                                components[0] = scriptNameString;
+                                NSString* beforeCommand = beforeScriptCommandName(scriptNameString);
+                                if (beforeCommand != NULL) {
+                                    [components removeObjectAtIndex:0];
+                                    NSArray<NSString*> *newComponents = [beforeCommand componentsSeparatedByCharactersInSet:[NSCharacterSet whitespaceCharacterSet]];
+                                    [components insertObjects:newComponents atIndexes:[NSIndexSet indexSetWithIndexesInRange:NSMakeRange(0, newComponents.count)]];
+                                }
+                                unsigned long numComponents = components.count;
                                 if (numComponents > 0) {
                                     // 2) insert all arguments at beginning of argument list:
                                     argc += numComponents;
@@ -2747,16 +3244,9 @@ int ios_system(const char* inputCmd) {
                                     argv[numComponents] = realloc(argv[numComponents], locationName.length + 1);
                                     strcpy(argv[numComponents], locationName.UTF8String);
                                     // Copy all arguments without change (except the first):
-                                    for (int i = 1; i < numComponents; i++) {
-                                        argv[i] = strdup(components[i + start].UTF8String); // creates new pointer
+                                    for (int i = 0; i < numComponents; i++) {
+                                        argv[i] = strdup(components[i].UTF8String); // creates new pointers
                                     }
-                                    // Extract stript name by removing the path:
-                                    NSString* scriptNameString = components[start];
-                                    NSCharacterSet* separators = [NSCharacterSet characterSetWithCharactersInString:@"/"];
-                                    NSArray<NSString*> *scriptComponents = [scriptNameString componentsSeparatedByCharactersInSet:separators];
-                                    scriptNameString = scriptComponents.lastObject;
-                                    argv[0] = strdup(scriptNameString.UTF8String); // creates new pointer
-                                    // TODO: need to loop back if scriptName is itself a file.
                                     break;
                                 }
                             } else {
@@ -2779,6 +3269,7 @@ int ios_system(const char* inputCmd) {
                                     strcpy(argv[1], locationName.UTF8String);
                                     // Copy all arguments without change (except the first):
                                     argv[0] = strdup("wasm"); // creates new pointer
+                                    break;
                                 }
                             }
                         } else {
@@ -2796,7 +3287,7 @@ int ios_system(const char* inputCmd) {
                 strcpy(argv[0], newName);
             }
         }
-        // NSLog(@"After command parsing, stdout %d stderr %d \n", fileno(params->stdout),  fileno(params->stderr));
+        NSLog(@"After command parsing, stdout %d stderr %d \n", fileno(params->stdout),  fileno(params->stderr));
         // fprintf(thread_stderr, "Command after parsing: ");
         // for (int i = 0; i < argc; i++)
         //    fprintf(thread_stderr, "[%s] ", argv[i]);
@@ -2805,78 +3296,26 @@ int ios_system(const char* inputCmd) {
         int (*function)(int ac, char** av) = NULL;
         if (commandList == nil) initializeCommandList();
         NSString* commandName = [NSString stringWithCString:argv[0] encoding:NSUTF8StringEncoding];
-        // hasPrefix covers python, python3, python3.9.
-        if ([commandName hasPrefix: @"python"]) {
-            // Ability to start multiple python3 scripts (required for Jupyter notebooks):
-            // start by increasing the number of the interpreter, until we're out.
-            int numInterpreter = 0;
-            if ((currentPythonInterpreter < numPythonInterpreters) && (!PythonIsRunning[currentPythonInterpreter])) {
-                numInterpreter = currentPythonInterpreter;
-                currentPythonInterpreter++;
-            } else {
-                while  (numInterpreter < numPythonInterpreters) {
-                    if (PythonIsRunning[numInterpreter] == false) break;
-                    numInterpreter++;
-                }
-                if (numInterpreter >= numPythonInterpreters) {
-                    display_alert(@"Too many Python scripts", @"There are too many Python interpreters running at the same time. Try closing some of them.");
-                    NSLog(@"%@", @"Too many python scripts running simultaneously. Try closing some notebooks.\n");
-                    commandName = @"notAValidCommand";
-                } else {
-                    currentPythonInterpreter = numInterpreter;
-                }
-            }
-            if ((numInterpreter == 0) && (strlen(argv[0]) > 7)) {
-                // python3.9 creates issues, so we truncate to 'python3'
-                argv[0][7] = 0;
-            }
-            if ((numInterpreter >= 0) && (numInterpreter < numPythonInterpreters)) {
-                PythonIsRunning[numInterpreter] = true;
-                if (numInterpreter > 0) {
-                    if ([commandName isEqualToString: @"python"]) {
-                        // Add space for an extra letter at the end of "python" (+1 for "A", +1 for '\0')
-                        argv[0] = realloc(argv[0], strlen(argv[0]) + 2);
+        if ([commandName isEqualToString:@"sh"]) {
+            // if it's sh -c commands (or sh -c command1 || command2), we continue using our own sh_main
+            // (for continuity: keep our known bugs, rather than break things).
+            // otherwise we use dash_main:
+            bool cflag = false;
+            // Technically, "-c" should be the first argument of sh, so no need to scan through all arguments
+            // But we're being extra careful.
+            for (int i = 1; i < argc; i++) {
+                if (argv[i][0] == '-') {
+                    if (strlen(argv[i]) == 1) continue;
+                    if (strchr(argv[i], 'c') != NULL) {
+                        cflag = true;
+                        break;
                     }
-                    char suffix[2];
-                    suffix[0] = 'A' + (numInterpreter - 1);
-                    suffix[1] = 0;
-                    argv[0][6] = suffix[0];
-                    argv[0][7] = 0;
-                    commandName = [@"python" stringByAppendingString: [NSString stringWithCString: suffix encoding:NSUTF8StringEncoding]];
-                }
+                } else break;
             }
-        } else if ([commandName hasPrefix: @"perl"]) {
-            // Ability to start multiple perl scripts (required for cpan):
-            // start by increasing the number of the interpreter, until we're out.
-            int numInterpreter = 0;
-            if (currentPerlInterpreter < numPerlInterpreters) {
-                numInterpreter = currentPerlInterpreter;
-                currentPerlInterpreter++;
-            } else {
-                while  (numInterpreter < numPerlInterpreters) {
-                    if (PerlIsRunning[numInterpreter] == false) break;
-                    numInterpreter++;
-                }
-                if (numInterpreter >= numPerlInterpreters) {
-                    display_alert(@"Too many Perl scripts", @"There are too many Perl interpreters running at the same time. Try closing some of them.");
-                    NSLog(@"%@", @"Too many perl scripts running simultaneously.\n");
-                    commandName = @"notAValidCommand";
-                }
-            }
-            if ((numInterpreter >= 0) && (numInterpreter < numPerlInterpreters)) {
-                PerlIsRunning[numInterpreter] = true;
-                if (numInterpreter > 0) {
-                    if ([commandName isEqualToString: @"perl"]) {
-                        // Add space for an extra letter at the end of "perl" (+1 for "A", +1 for '\0')
-                        argv[0] = realloc(argv[0], strlen(argv[0]) + 2);
-                    }
-                    char suffix[2];
-                    suffix[0] = 'A' + (numInterpreter - 1);
-                    suffix[1] = 0;
-                    argv[0][4] = suffix[0];
-                    argv[0][5] = 0;
-                    commandName = [@"perl" stringByAppendingString: [NSString stringWithCString: suffix encoding:NSUTF8StringEncoding]];
-                }
+            if (!cflag) { // We need to know it's dash, not sh.
+                commandName = @"dash";
+                argv[0] = realloc(argv[0], 5);
+                strcpy(argv[0], "dash");
             }
         }
         //
@@ -2884,26 +3323,255 @@ int ios_system(const char* inputCmd) {
         void* handle = NULL;
         if (commandStructure != nil) {
             NSString* libraryName = commandStructure[0];
+            NSString* functionName = commandStructure[1];
+            // Python, Perl and TeX can have multiple commands calling themselves:
+            // hasPrefix covers python, python3, python3.9.
+            if ([commandName hasPrefix: @"python"]) {
+                // Ability to start multiple python3 scripts (required for Jupyter notebooks):
+                // start by increasing the number of the interpreter, until we're out.
+                int numInterpreter = 0;
+                if ((currentPythonInterpreter < numPythonInterpreters) && (!PythonIsRunning[currentPythonInterpreter])) {
+                    numInterpreter = currentPythonInterpreter;
+                    currentPythonInterpreter++;
+                } else {
+                    NSDate *start = [NSDate date];
+                    NSDate *now = [NSDate date];
+                    NSTimeInterval timeInterval = [now timeIntervalSinceDate:start];
+                    while (timeInterval < 1) { // keep trying for 1 second
+                        while  (numInterpreter < numPythonInterpreters) {
+                            if (PythonIsRunning[numInterpreter] == false) break;
+                            numInterpreter++;
+                        }
+                        if (numInterpreter < numPythonInterpreters) break;
+                        numInterpreter = 0;
+                        now = [NSDate date];
+                        timeInterval = [now timeIntervalSinceDate:start];
+                    }
+                    if (numInterpreter >= numPythonInterpreters) {
+                        if (showPythonInterpreterAlert) {
+                            // Only show this alert once per session:
+                            display_alert(@"Too many Python scripts", @"There are too many Python interpreters running at the same time. Try closing some of them.");
+                            NSLog(@"%@", @"Too many python scripts running simultaneously. Try closing some notebooks.\n");
+                            showPythonInterpreterAlert = false;
+                            currentSession->global_errno = ENOENT;
+                        }
+                        function = &too_many_scripts;
+                        functionName = @"notAValidCommand";
+                        argv[0][0] = 'x'; // prevent reinitialization in cleanup_function
+                    } else {
+                        currentPythonInterpreter = numInterpreter;
+                    }
+                }
+                if ((numInterpreter == 0) && (strlen(argv[0]) > 7)) {
+                    // python3.x creates issues, so we truncate to 'python3'
+                    argv[0][7] = 0;
+                }
+                if ((numInterpreter >= 0) && (numInterpreter < numPythonInterpreters)) {
+                    params->numInterpreter = numInterpreter;
+                    PythonIsRunning[numInterpreter] = true;
+                    if (numInterpreter > 0) {
+                        if ([commandName isEqualToString: @"python"]) {
+                            // Add space for an extra letter at the end of "python" (+1 for "A", +1 for '\0')
+                            argv[0] = realloc(argv[0], strlen(argv[0]) + 2);
+                        }
+                        char suffix[2];
+                        suffix[0] = 'A' + (numInterpreter - 1);
+                        suffix[1] = 0;
+                        argv[0][6] = suffix[0];
+                        argv[0][7] = 0;
+                        commandName = [@"python" stringByAppendingString: [NSString stringWithCString: suffix encoding:NSUTF8StringEncoding]];
+                        NSLog(@"Python new commandName: %s", commandName.UTF8String);
+                        libraryName = [[commandName stringByAppendingString: @".framework/"] stringByAppendingString: commandName];
+                        NSLog(@"Python new libraryName: %s", libraryName.UTF8String);
+                    }
+                }
+            } else if ([commandName hasPrefix: @"perl"]) {
+                // Ability to start multiple perl scripts (required for cpan):
+                // start by increasing the number of the interpreter, until we're out.
+                int numInterpreter = 0;
+                if (currentPerlInterpreter < numPerlInterpreters) {
+                    numInterpreter = currentPerlInterpreter;
+                    currentPerlInterpreter++;
+                } else {
+                    while  (numInterpreter < numPerlInterpreters) {
+                        if (PerlIsRunning[numInterpreter] == false) break;
+                        numInterpreter++;
+                    }
+                    if (numInterpreter >= numPerlInterpreters) {
+                        display_alert(@"Too many Perl scripts", @"There are too many Perl interpreters running at the same time. Try closing some of them.");
+                        NSLog(@"%@", @"Too many perl scripts running simultaneously.\n");
+                        function = &too_many_scripts;
+                        functionName = @"notAValidCommand";
+                        currentSession->global_errno = ENOENT;
+                        argv[0][0] = 'x'; // prevent reinitialization in cleanup_function
+                    }
+                }
+                if ((numInterpreter >= 0) && (numInterpreter < numPerlInterpreters)) {
+                    params->numInterpreter = numInterpreter;
+                    PerlIsRunning[numInterpreter] = true;
+                    NSLog(@"Starting a Perl interpreter: %d", params->numInterpreter);
+                    if (numInterpreter > 0) {
+                        char suffix[2];
+                        suffix[0] = 'A' + (numInterpreter - 1);
+                        suffix[1] = 0;
+                        commandName = [@"perl" stringByAppendingString: [NSString stringWithCString: suffix encoding:NSUTF8StringEncoding]];
+                        libraryName = [libraryName stringByReplacingOccurrencesOfString:@"perl" withString:commandName];
+                    }
+                }
+            } else if ([TeXcommands containsObject: commandName]) {
+                // It's a TeX command. Ability to start multiple TeX commands (required for Tikz)
+                // start by increasing the number of the interpreter, until we're out.
+                int numInterpreter = 0;
+                if (currentTeXInterpreter < numTeXInterpreters) {
+                    numInterpreter = currentTeXInterpreter;
+                    currentTeXInterpreter++;
+                } else {
+                    while  (numInterpreter < numTeXInterpreters) {
+                        if (TeXIsRunning[numInterpreter] == false) break;
+                        numInterpreter++;
+                    }
+                    if (numInterpreter >= numTeXInterpreters) {
+                        display_alert(@"Too many TeX scripts", @"There are too many TeX interpreters running at the same time. Try closing some of them.");
+                        NSLog(@"%@", @"Too many TeX scripts running simultaneously.\n");
+                        function = &too_many_scripts;
+                        functionName = @"notAValidCommand";
+                        currentSession->global_errno = ENOENT;
+                        argv[0][0] = 'x'; // prevent reinitialization in cleanup_function
+                    }
+                }
+                if ((numInterpreter >= 0) && (numInterpreter < numTeXInterpreters)) {
+                    params->numInterpreter = numInterpreter;
+                    TeXIsRunning[numInterpreter] = true;
+                    if (numInterpreter > 0) {
+                        // There are multiple TeX commands, and they can start each other.
+                        char suffix[2];
+                        suffix[0] = 'A' + (numInterpreter - 1);
+                        suffix[1] = 0;
+                        // libraryName can be pdftex, luatex or luahbtex:
+                        if ([libraryName hasPrefix: @"pdftex"]) {
+                            NSString* newName = [@"pdftex" stringByAppendingString: [NSString stringWithCString: suffix encoding:NSUTF8StringEncoding]];
+                            libraryName = [libraryName stringByReplacingOccurrencesOfString:@"pdftex" withString:newName];
+                        } else if ([libraryName hasPrefix: @"luatex"]) {
+                            NSString* newName = [@"luatex" stringByAppendingString: [NSString stringWithCString: suffix encoding:NSUTF8StringEncoding]];
+                            libraryName = [libraryName stringByReplacingOccurrencesOfString:@"luatex" withString:newName];
+                        } else if ([libraryName hasPrefix: @"luahbtex"]) {
+                            NSString* newName = [@"luahbtex" stringByAppendingString: [NSString stringWithCString: suffix encoding:NSUTF8StringEncoding]];
+                            libraryName = [libraryName stringByReplacingOccurrencesOfString:@"luahbtex" withString:newName];
+                        } else if ([libraryName hasPrefix: @"xetex"]) {
+                            NSString* newName = [@"xetex" stringByAppendingString: [NSString stringWithCString: suffix encoding:NSUTF8StringEncoding]];
+                            libraryName = [libraryName stringByReplacingOccurrencesOfString:@"xetex" withString:newName];
+                        } else if ([libraryName hasPrefix: @"xdvipdfmx"]) {
+                            NSString* newName = [@"xdvipdfmx" stringByAppendingString: [NSString stringWithCString: suffix encoding:NSUTF8StringEncoding]];
+                            libraryName = [libraryName stringByReplacingOccurrencesOfString:@"xdvipdfmx" withString:newName];
+                        }
+                    }
+                }
+            } else if ([commandName hasPrefix: @"dash"]) {
+                // Ability to start multiple dash commands:
+                // start by increasing the number of the interpreter, until we're out.
+                int numInterpreter = 0;
+                if (currentDashCommand < numDashCommands) {
+                    numInterpreter = currentDashCommand;
+                    currentDashCommand++;
+                } else {
+                    NSDate *start = [NSDate date];
+                    NSDate *now = [NSDate date];
+                    NSTimeInterval timeInterval = [now timeIntervalSinceDate:start];
+                    while (timeInterval < 1) { // keep trying for 1 second
+                        while  (numInterpreter < numDashCommands) {
+                            if (dashIsRunning[numInterpreter] == false) break;
+                            numInterpreter++;
+                        }
+                        if (numInterpreter < numDashCommands) break;
+                        numInterpreter = 0;
+                        now = [NSDate date];
+                        timeInterval = [now timeIntervalSinceDate:start];
+                    }
+                    if (numInterpreter >= numDashCommands) {
+                        display_alert(@"Too many dash scripts", @"There are too many dash scripts running at the same time. Try closing some of them.");
+                        NSLog(@"%@", @"Too many dash scripts running simultaneously.\n");
+                        functionName = @"notAValidCommand";
+                        currentSession->global_errno = ENOENT;
+                        argv[0][0] = 'x'; // prevent reinitialization in cleanup_function
+                    }
+                }
+                if ((numInterpreter >= 0) && (numInterpreter < numDashCommands)) {
+                    params->numInterpreter = numInterpreter;
+                    dashIsRunning[numInterpreter] = true;
+                    NSLog(@"Starting a dash shell: %d", params->numInterpreter);
+                    if (numInterpreter > 0) {
+                        char suffix[2];
+                        suffix[0] = 'A' + (numInterpreter - 1);
+                        suffix[1] = 0;
+                        commandName = [@"dash" stringByAppendingString: [NSString stringWithCString: suffix encoding:NSUTF8StringEncoding]];
+                        libraryName = [libraryName stringByReplacingOccurrencesOfString:@"dash" withString:commandName];
+                    }
+                }
+            } else if ([commandName isEqualToString: @"ssh"] || [commandName isEqualToString: @"scp"] || [commandName isEqualToString: @"sftp"]) {
+                // Ability to start multiple ssh commands:
+                // start by increasing the number of the interpreter, until we're out.
+                int numInterpreter = 0;
+                if (currentSshCommand < numSshCommands) {
+                    numInterpreter = currentSshCommand;
+                    currentSshCommand++;
+                } else {
+                    NSDate *start = [NSDate date];
+                    NSDate *now = [NSDate date];
+                    NSTimeInterval timeInterval = [now timeIntervalSinceDate:start];
+                    while (timeInterval < 1) { // keep trying for 1 second
+                        while  (numInterpreter < numSshCommands) {
+                            if (sshIsRunning[numInterpreter] == false) break;
+                            numInterpreter++;
+                        }
+                        if (numInterpreter < numSshCommands) break;
+                        numInterpreter = 0;
+                        now = [NSDate date];
+                        timeInterval = [now timeIntervalSinceDate:start];
+                    }
+                    if (numInterpreter >= numSshCommands) {
+                        display_alert(@"Too many ssh commands", @"There are too many ssh commands running at the same time. Try closing some of them.");
+                        NSLog(@"%@", @"Too many ssh scripts running simultaneously.\n");
+                        functionName = @"notAValidCommand";
+                        currentSession->global_errno = ENOENT;
+                        argv[0][0] = 'x'; // prevent reinitialization in cleanup_function
+                    }
+                }
+                if ((numInterpreter >= 0) && (numInterpreter < numSshCommands)) {
+                    params->numInterpreter = numInterpreter;
+                    sshIsRunning[numInterpreter] = true;
+                    NSLog(@"Starting a ssh command: %d", params->numInterpreter);
+                    if (numInterpreter > 0) {
+                        char suffix[2];
+                        suffix[0] = 'A' + (numInterpreter - 1);
+                        suffix[1] = 0;
+                        commandName = [@"ssh_cmd" stringByAppendingString: [NSString stringWithCString: suffix encoding:NSUTF8StringEncoding]];
+                        libraryName = [libraryName stringByReplacingOccurrencesOfString:@"ssh_cmd" withString:commandName];
+                    }
+                }
+            }
             if ([libraryName isEqualToString: @"SELF"]) handle = RTLD_SELF;  // commands defined in ios_system.framework
             else if ([libraryName isEqualToString: @"MAIN"]) handle = RTLD_MAIN_ONLY; // commands defined in main program
             else handle = dlopen(libraryName.UTF8String, RTLD_LAZY | RTLD_GLOBAL); // commands defined in dynamic library
             if (handle == NULL) {
-                NSLog(@"Failed loading %s from %s, cause = %s\n", commandName.UTF8String, libraryName.UTF8String, dlerror());
-                // if (sideLoading)
-                fprintf(thread_stderr, "Failed loading %s from %s, cause = %s\n", commandName.UTF8String, libraryName.UTF8String, dlerror());
+                char* errorLoading = strdup(dlerror());
+                fprintf(thread_stderr, "Failed loading %s from %s, cause = %s\n", commandName.UTF8String, libraryName.UTF8String, errorLoading);
+                NSLog(@"Failed loading %s from %s, cause = %s\n", commandName.UTF8String, libraryName.UTF8String, errorLoading);
                 NSString* fileLocation = [[NSBundle mainBundle] pathForResource:libraryName ofType:nil];
+                free(errorLoading);
             } else {
-                NSString* functionName = commandStructure[1];
                 function = dlsym(handle, functionName.UTF8String);
+                NSLog(@"Loading %s from %s", functionName.UTF8String, libraryName.UTF8String);
                 if (function == NULL) {
-                    NSLog(@"Failed loading %s from %s, cause = %s\n", commandName.UTF8String, libraryName.UTF8String, dlerror());
-                    // if (sideLoading)
-                    fprintf(thread_stderr, "Failed loading %s from %s, cause = %s\n", functionName.UTF8String, libraryName.UTF8String, dlerror());
+                    char* errorLoading = strdup(dlerror());
+                    fprintf(thread_stderr, "Failed loading %s from %s, cause = %s\n", functionName.UTF8String, libraryName.UTF8String, errorLoading);
+                    NSLog(@"Failed loading %s from %s, cause = %s\n", commandName.UTF8String, libraryName.UTF8String, errorLoading);
+                    free(errorLoading);
                 }
             }
         }
         if (function == NULL) {
             function = &command_not_found;
+            currentSession->global_errno = ENOENT;
             // function = dlsym(RTLD_SELF, "command_not_found");
         }
         if (function) {
@@ -2915,9 +3583,14 @@ int ios_system(const char* inputCmd) {
             params->argv = argv;
             params->function = function;
             params->dlHandle = handle;
+            params->isPipeIn = (params->stdin != thread_stdin);
             params->isPipeOut = (params->stdout != thread_stdout);
-            // NSLog(@"params->stdout: %d thread_stdout: %d \n", fileno(params->stdout), fileno(thread_stdout));
+            if (params->stdout != NULL)
+                NSLog(@"params->stdout: %d thread_stdout: %d \n", fileno(params->stdout), fileno(thread_stdout));
+            if (params->stdin != NULL)
+                NSLog(@"params->stdin: %d thread_stdin: %d \n", fileno(params->stdin), fileno(thread_stdin));
             params->isPipeErr = (params->stderr != thread_stderr) && (params->stderr != params->stdout);
+            params->storeRootThread = false;
             // params->session = currentSession;
             // Before starting, do we have enough file descriptors available?
             int numFileDescriptorsOpen = 0;
@@ -2929,15 +3602,27 @@ int ios_system(const char* inputCmd) {
                 }
                 ++numFileDescriptorsOpen ;
             }
+            NSLog(@"\nNum file descriptors opened = %d limit= %llu\n", numFileDescriptorsOpen, limitFilesOpen.rlim_cur);
             // fprintf(stderr, "Num file descriptor = %d\n", numFileDescriptorsOpen);
             // We assume 128 file descriptors will be enough for a single command.
             if (numFileDescriptorsOpen + 128 > limitFilesOpen.rlim_cur) {
                 limitFilesOpen.rlim_cur += 1024;
                 int res = setrlimit(RLIMIT_NOFILE, &limitFilesOpen);
-                if (res == 0) NSLog(@"[Info] Increased file descriptor limit to = %llu\n", limitFilesOpen.rlim_cur);
+                // Check the result:
+                getrlimit(RLIMIT_NOFILE, &limitFilesOpen);
+                if (res == 0) NSLog(@"[Info] Increased file descriptor limit to = %llu OPEN_MAX= %d\n", limitFilesOpen.rlim_cur, OPEN_MAX);
                 else NSLog(@"[Warning] Failed to increased file descriptor limit to = %llu\n", limitFilesOpen.rlim_cur);
             }
+            NSLog(@"Starting command: %s, currentSession->isMainThread: %d", commandName.UTF8String, currentSession->isMainThread);
+            if ([commandName isEqualToString:@"wasm"])
+                startedPreparingWebAssemblyCommand();
             if (currentSession->isMainThread) {
+                params->storeRootThread = true;
+                // I'm still not sure why this is needed specially for dash and no other commands:
+                // Needed for pipes
+                if ([commandName isEqualToString: @"dash"]) {
+                    params->storeRootThread = false;
+                }
                 bool commandOperatesOnFiles = ([commandStructure[3] isEqualToString:@"file"] ||
                                                [commandStructure[3] isEqualToString:@"directory"] ||
                                                params->isPipeOut || params->isPipeErr);
@@ -2945,8 +3630,6 @@ int ios_system(const char* inputCmd) {
                 commandOperatesOnFiles &= (currentPath != nil);
                 if (commandOperatesOnFiles) {
                     // Send a signal to the system that we're going to change the current directory:
-                    // TODO: only do this if the command actually accesses files: either outputFile exists,
-                    // or errorFile exists, or the command uses files.
                     NSURL* currentURL = [NSURL fileURLWithPath:currentPath];
                     NSFileCoordinator *fileCoordinator =  [[NSFileCoordinator alloc] initWithFilePresenter:nil];
                     [fileCoordinator coordinateWritingItemAtURL:currentURL options:0 error:NULL byAccessor:^(NSURL *currentURL) {
@@ -2955,7 +3638,6 @@ int ios_system(const char* inputCmd) {
                         pthread_create(&_tid, NULL, run_function, params);
                         while (_tid == NULL) { }
                         // ios_storeThreadId(_tid);
-                        currentSession->current_command_root_thread = _tid;
                         if (currentSession->mainThreadId == NULL) currentSession->mainThreadId = _tid;
                         // Wait for this process to finish:
 						if (joinMainThread) {
@@ -2975,7 +3657,6 @@ int ios_system(const char* inputCmd) {
                     pthread_create(&_tid, NULL, run_function, params);
                     while (_tid == NULL) { }
                     // ios_storeThreadId(_tid);
-                    currentSession->current_command_root_thread = _tid;
                     if (currentSession->mainThreadId == NULL) currentSession->mainThreadId = _tid;
                     // Wait for this process to finish:
 					if (joinMainThread) {
@@ -3065,7 +3746,6 @@ NSString * pathNormalize(NSString *path) {
   NSString * result = [pathNormalizeArray([path pathComponents], !isAbsolute) componentsJoinedByString: @"/"];
   
   if (!result.length && !isAbsolute) {
-      // Same function as chdir, except it does not lock. To be called from ios_releaseThread*()
     result = @".";
   }
   
@@ -3100,7 +3780,7 @@ NSString * pathJoin(NSString * segmentA, NSString * segmentB) {
 }
 
 //
-char* ios_getPythonLibraryName() {
+char* ios_getPythonLibraryName(void) {
     // Ability to start multiple python3 scripts, expanded for commands that start python3 as a dynamic library.
     // (mostly vim, right now)
     // start by increasing the number of the interpreter, until we're out.
@@ -3129,14 +3809,15 @@ char* ios_getPythonLibraryName() {
         } else {
             libraryName = strdup("python3_ios");
         }
-        // NSLog(@"ios_getPythonLibraryName: returning %s\n", libraryName);
+        NSLog(@"ios_getPythonLibraryName: returning %s\n", libraryName);
         return libraryName;
     }
-    // NSLog(@"ios_getPythonLibraryName: returning NULL\n");
+    NSLog(@"ios_getPythonLibraryName: returning NULL\n");
     return NULL;
 }
 
 void ios_releasePythonLibraryName(char* name) {
+    NSLog(@"ios_releasePythonLibraryName: releasing %s\n", name);
     char libNumber = name[6];
     if (libNumber == '3') PythonIsRunning[0] = false;
     else {

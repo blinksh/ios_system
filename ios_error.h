@@ -40,8 +40,10 @@ extern "C" {
   #define fputs ios_fputs
   #define fputc ios_fputc
   #define putw ios_putw
+  #define putp ios_putp
   #define fflush ios_fflush
-#endif 
+  #define abort() ios_exit(1)
+#endif
 
 // Thread-local input and output streams
 extern __thread FILE* thread_stdin;
@@ -49,7 +51,6 @@ extern __thread FILE* thread_stdout;
 extern __thread FILE* thread_stderr;
 
 #define exit ios_exit
-#define abort() ios_exit(1)
 #define _exit ios_exit
 #define kill ios_killpid
 #define _kill ios_killpid
@@ -101,7 +102,7 @@ extern ssize_t ios_write(int fildes, const void *buf, size_t nbyte);
 extern size_t ios_fwrite(const void *ptr, size_t size, size_t nitems, FILE *stream);
 extern int ios_puts(const char *s);
 extern int ios_fputs(const char* s, FILE *stream);
-extern    int ios_fputc(int c, FILE *stream);
+extern int ios_fputc(int c, FILE *stream);
 extern int ios_putw(int w, FILE *stream);
 extern int ios_fflush(FILE *stream);
 extern int ios_gettty(void);
@@ -109,6 +110,11 @@ extern int ios_opentty(void);
 extern void ios_closetty(void);
 extern void ios_stopInteractive(void);
 extern void ios_startInteractive(void);
+extern int ios_storeInteractive(void);
+// Communication between dash and ios_system:
+extern const char* ios_expandtilde(const char *login);
+extern void ios_activateChildStreams(FILE** old_stdin, FILE** old_stdout,  FILE ** old_stderr);
+extern const char* ios_getBookmarkedVersion(const char* p);
 
 #ifdef __cplusplus
 }

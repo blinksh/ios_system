@@ -7,6 +7,7 @@
 //
 
 #import <Foundation/Foundation.h>
+#import <UIKit/UIKit.h>
 
 //! Project version number for ios_system.
 FOUNDATION_EXPORT double ios_systemVersionNumber;
@@ -19,6 +20,15 @@ extern __thread FILE* thread_stdin;
 extern __thread FILE* thread_stdout;
 extern __thread FILE* thread_stderr;
 extern __thread void* thread_context;
+
+// rust doesn't support extern __thread vars yet
+// see https://github.com/rust-lang/rust/issues/30795
+// so we provide function accessors for them.
+extern FILE* ios_stdin(void);
+extern FILE* ios_stdout(void);
+extern FILE* ios_stderr(void);
+extern void* ios_context(void);
+
 // set to true to have more commands available, more debugging information.
 extern bool sideLoading;
 // set to false to have the main thread run in detached mode (non blocking)
@@ -76,5 +86,12 @@ extern void makeGlobal(void);
 extern void makeLocal(void);
 extern void replaceCommand(NSString* commandName, NSString* functionName, bool allOccurences);
 extern NSError* addCommandList(NSString* fileLocation);
+extern NSArray* backgroundCommandList;
 extern int numPythonInterpreters;
+extern int numPerlInterpreters;
+extern int numTeXInterpreters;
 extern int cd_main(int argc, char** argv);
+extern const char* ios_getBookmarkedVersion(const char* p);
+extern void ios_stopInteractive(void);
+extern void finishedPreparingWebAssemblyCommand(void);
+extern int webAssemblyCommandOrder(void);
