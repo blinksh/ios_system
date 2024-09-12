@@ -10,17 +10,17 @@ OutputLevel.default = .error
 let platforms: [Platform] = [.iPhoneOS, .iPhoneSimulator, .Catalyst]
 
 let allSchemes = [
-    "ios_system",
-    "awk",
-    "curl_ios", 
-    "files",
-    "shell",
-    "ssh_cmd",
-    "ssh_cmdA",
-    "ssh_agent",
-    "sshd",
-    "tar",
-    "text",
+    //"ios_system",
+    //"awk",
+    "curl_ios",
+    //"files",
+    //"shell",
+    // "ssh_cmd",
+    // "ssh_cmdA",
+    // "ssh_agent",
+    // "sshd",
+    //"tar",
+    //"text",
     ]
 
 let args = ProcessInfo.processInfo.arguments 
@@ -53,6 +53,8 @@ for scheme in schemes {
 var releaseNotes =
 """
 Release notes:
+
+This Blink version only releases the modified libraries against regular ios_system.
 
 \( checksums.markdown(headers: "File", "SHA 256") )
 

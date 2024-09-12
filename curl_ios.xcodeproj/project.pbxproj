@@ -354,7 +354,7 @@
 		2219E2CB1FD7E58600675252 /* tool_writeout.h in Headers */ = {isa = PBXBuildFile; fileRef = 2219E2681FD7E58600675252 /* tool_writeout.h */; };
 		2219E2CC1FD7E58600675252 /* tool_xattr.c in Sources */ = {isa = PBXBuildFile; fileRef = 2219E2691FD7E58600675252 /* tool_xattr.c */; };
 		2219E2CD1FD7E58600675252 /* tool_xattr.h in Headers */ = {isa = PBXBuildFile; fileRef = 2219E26A1FD7E58600675252 /* tool_xattr.h */; };
-		BDF2B8E22BC490BE00B9C7EA /* openssl.xcframework in Frameworks */ = {isa = PBXBuildFile; fileRef = BDF2B8E12BC490BE00B9C7EA /* openssl.xcframework */; };
+		BDF040DF2C9B1C64005B7138 /* openssl.xcframework in Frameworks */ = {isa = PBXBuildFile; fileRef = BDF2B8E12BC490BE00B9C7EA /* openssl.xcframework */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -715,7 +715,7 @@
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
-				BDF2B8E22BC490BE00B9C7EA /* openssl.xcframework in Frameworks */,
+				BDF040DF2C9B1C64005B7138 /* openssl.xcframework in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

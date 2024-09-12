@@ -868,8 +868,7 @@
 		BDD520932BB5FC57004E2457 /* openssl.xcframework in Frameworks */ = {isa = PBXBuildFile; fileRef = BDD520922BB5FC57004E2457 /* openssl.xcframework */; };
 		BDD520942BB5FC57004E2457 /* openssl.xcframework in Frameworks */ = {isa = PBXBuildFile; fileRef = BDD520922BB5FC57004E2457 /* openssl.xcframework */; };
 		BDD520952BB5FC57004E2457 /* openssl.xcframework in Frameworks */ = {isa = PBXBuildFile; fileRef = BDD520922BB5FC57004E2457 /* openssl.xcframework */; };
-		BDD520982BB5FC5C004E2457 /* openssl.xcframework in Frameworks */ = {isa = PBXBuildFile; fileRef = BDD520922BB5FC57004E2457 /* openssl.xcframework */; };
-		BDD520992BB5FC5C004E2457 /* openssl.xcframework in Embed Frameworks */ = {isa = PBXBuildFile; fileRef = BDD520922BB5FC57004E2457 /* openssl.xcframework */; settings = {ATTRIBUTES = (CodeSignOnCopy, RemoveHeadersOnCopy, ); }; };
+		BDF040E22C9B2069005B7138 /* openssl.xcframework in Frameworks */ = {isa = PBXBuildFile; fileRef = BDD520922BB5FC57004E2457 /* openssl.xcframework */; };
 		D285143225B1D7CD003405B4 /* sshkey.h in Headers */ = {isa = PBXBuildFile; fileRef = D285143125B1D7CD003405B4 /* sshkey.h */; };
 		D285144425B1DE19003405B4 /* cipher.h in Headers */ = {isa = PBXBuildFile; fileRef = D285144325B1DE19003405B4 /* cipher.h */; };
 		D285145625B1DE61003405B4 /* ssherr.h in Headers */ = {isa = PBXBuildFile; fileRef = D285145525B1DE61003405B4 /* ssherr.h */; };
@@ -878,20 +877,6 @@
 		D285149C25B200B9003405B4 /* openssl-compat.h in Headers */ = {isa = PBXBuildFile; fileRef = D285149B25B200B9003405B4 /* openssl-compat.h */; };
 		D28514A625B20351003405B4 /* config.h in Headers */ = {isa = PBXBuildFile; fileRef = D28514A525B20351003405B4 /* config.h */; };
 /* End PBXBuildFile section */
-
-/* Begin PBXCopyFilesBuildPhase section */
-		BDD5209A2BB5FC5C004E2457 /* Embed Frameworks */ = {
-			isa = PBXCopyFilesBuildPhase;
-			buildActionMask = 2147483647;
-			dstPath = "";
-			dstSubfolderSpec = 10;
-			files = (
-				BDD520992BB5FC5C004E2457 /* openssl.xcframework in Embed Frameworks */,
-			);
-			name = "Embed Frameworks";
-			runOnlyForDeploymentPostprocessing = 0;
-		};
-/* End PBXCopyFilesBuildPhase section */
 
 /* Begin PBXFileReference section */
 		22122E2A21BC129000D8FE74 /* say.m */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.objc; path = say.m; sourceTree = "<group>"; };
@@ -1637,8 +1622,8 @@
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				BDF040E22C9B2069005B7138 /* openssl.xcframework in Frameworks */,
 				22F6A25E20683F9B00E618F9 /* ios_system.framework in Frameworks */,
-				BDD520982BB5FC5C004E2457 /* openssl.xcframework in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -3208,7 +3193,6 @@
 				22F6A1AB20683F4100E618F9 /* Frameworks */,
 				22F6A1AC20683F4100E618F9 /* Headers */,
 				22F6A1AD20683F4100E618F9 /* Resources */,
-				BDD5209A2BB5FC5C004E2457 /* Embed Frameworks */,
 			);
 			buildRules = (
 			);

@@ -31,58 +31,6 @@ jobs:
         draft: false
         prerelease: false
 
-    - name: Upload ios_error.h
-      id: upload_ios_error
-      uses: actions/upload-release-asset@v1
-      env:
-        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      with:
-        upload_url: ${{ steps.create_release.outputs.upload_url }} 
-        asset_path: ios_error.h
-        asset_name: ios_error.h
-        asset_content_type: text/plain
-
-    - name: Upload commandDictionary.plist 
-      id: upload_commandDictionary
-      uses: actions/upload-release-asset@v1
-      env:
-        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      with:
-        upload_url: ${{ steps.create_release.outputs.upload_url }} 
-        asset_path: ./Resources/commandDictionary.plist
-        asset_name: commandDictionary.plist
-        asset_content_type: text/plain
-
-    - name: Upload ios_system
-      id: upload-ios_system
-      uses: actions/upload-release-asset@v1
-      env:
-        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      with:
-        upload_url: ${{ steps.create_release.outputs.upload_url }} 
-        asset_path: .build/ios_system.xcframework.zip
-        asset_name: ios_system.xcframework.zip
-        asset_content_type: application/zip
-    - name: Upload awk.xcframework
-      id: upload-awk
-      uses: actions/upload-release-asset@v1
-      env:
-        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      with:
-        upload_url: ${{ steps.create_release.outputs.upload_url }} 
-        asset_path: .build/awk.xcframework.zip
-        asset_name: awk.xcframework.zip
-        asset_content_type: application/zip
-    - name: Upload tar.xcframework
-      id: upload-tar
-      uses: actions/upload-release-asset@v1
-      env:
-        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      with:
-        upload_url: ${{ steps.create_release.outputs.upload_url }} 
-        asset_path: .build/tar.xcframework.zip
-        asset_name: tar.xcframework.zip
-        asset_content_type: application/zip
     - name: Upload curl_ios.xcframework
       id: upload-curl_ios
       uses: actions/upload-release-asset@v1
@@ -93,43 +41,96 @@ jobs:
         asset_path: .build/curl_ios.xcframework.zip
         asset_name: curl_ios.xcframework.zip
         asset_content_type: application/zip
-    - name: Upload files.xcframework
-      id: upload-files
-      uses: actions/upload-release-asset@v1
-      env:
-        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      with:
-        upload_url: ${{ steps.create_release.outputs.upload_url }} 
-        asset_path: .build/files.xcframework.zip
-        asset_name: files.xcframework.zip
-        asset_content_type: application/zip
-    - name: Upload shell.xcframework
-      id: upload-shell
-      uses: actions/upload-release-asset@v1
-      env:
-        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      with:
-        upload_url: ${{ steps.create_release.outputs.upload_url }} 
-        asset_path: .build/shell.xcframework.zip
-        asset_name: shell.xcframework.zip
-        asset_content_type: application/zip
-    - name: Upload ssh_cmd.xcframework
-      id: upload-ssh
-      uses: actions/upload-release-asset@v1
-      env:
-        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      with:
-        upload_url: ${{ steps.create_release.outputs.upload_url }} 
-        asset_path: .build/ssh_cmd.xcframework.zip
-        asset_name: ssh_cmd.xcframework.zip
-        asset_content_type: application/zip
-    - name: Upload text.xcframework
-      id: upload-text
-      uses: actions/upload-release-asset@v1
-      env:
-        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      with:
-        upload_url: ${{ steps.create_release.outputs.upload_url }} 
-        asset_path: .build/text.xcframework.zip
-        asset_name: text.xcframework.zip
-        asset_content_type: application/zip
+
+    # - name: Upload ios_error.h
+    #   id: upload_ios_error
+    #   uses: actions/upload-release-asset@v1
+    #   env:
+    #     GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    #   with:
+    #     upload_url: ${{ steps.create_release.outputs.upload_url }} 
+    #     asset_path: ios_error.h
+    #     asset_name: ios_error.h
+    #     asset_content_type: text/plain
+
+    # - name: Upload commandDictionary.plist 
+    #   id: upload_commandDictionary
+    #   uses: actions/upload-release-asset@v1
+    #   env:
+    #     GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    #   with:
+    #     upload_url: ${{ steps.create_release.outputs.upload_url }} 
+    #     asset_path: ./Resources/commandDictionary.plist
+    #     asset_name: commandDictionary.plist
+    #     asset_content_type: text/plain
+
+    # - name: Upload ios_system
+    #   id: upload-ios_system
+    #   uses: actions/upload-release-asset@v1
+    #   env:
+    #     GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    #   with:
+    #     upload_url: ${{ steps.create_release.outputs.upload_url }} 
+    #     asset_path: .build/ios_system.xcframework.zip
+    #     asset_name: ios_system.xcframework.zip
+    #     asset_content_type: application/zip
+    # - name: Upload awk.xcframework
+    #   id: upload-awk
+    #   uses: actions/upload-release-asset@v1
+    #   env:
+    #     GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    #   with:
+    #     upload_url: ${{ steps.create_release.outputs.upload_url }} 
+    #     asset_path: .build/awk.xcframework.zip
+    #     asset_name: awk.xcframework.zip
+    #     asset_content_type: application/zip
+    # - name: Upload tar.xcframework
+    #   id: upload-tar
+    #   uses: actions/upload-release-asset@v1
+    #   env:
+    #     GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    #   with:
+    #     upload_url: ${{ steps.create_release.outputs.upload_url }} 
+    #     asset_path: .build/tar.xcframework.zip
+    #     asset_name: tar.xcframework.zip
+    #     asset_content_type: application/zip
+    # - name: Upload files.xcframework
+    #   id: upload-files
+    #   uses: actions/upload-release-asset@v1
+    #   env:
+    #     GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    #   with:
+    #     upload_url: ${{ steps.create_release.outputs.upload_url }} 
+    #     asset_path: .build/files.xcframework.zip
+    #     asset_name: files.xcframework.zip
+    #     asset_content_type: application/zip
+    # - name: Upload shell.xcframework
+    #   id: upload-shell
+    #   uses: actions/upload-release-asset@v1
+    #   env:
+    #     GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    #   with:
+    #     upload_url: ${{ steps.create_release.outputs.upload_url }} 
+    #     asset_path: .build/shell.xcframework.zip
+    #     asset_name: shell.xcframework.zip
+    #     asset_content_type: application/zip
+    # - name: Upload ssh_cmd.xcframework
+    #   id: upload-ssh
+    #   uses: actions/upload-release-asset@v1
+    #   env:
+    #     GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    #   with:
+    #     upload_url: ${{ steps.create_release.outputs.upload_url }} 
+    #     asset_path: .build/ssh_cmd.xcframework.zip
+    #     asset_name: ssh_cmd.xcframework.zip
+    #     asset_content_type: application/zip
+    # - name: Upload text.xcframework
+    #   id: upload-text
+    #   uses: actions/upload-release-asset@v1
+    #   env:
+    #     GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    #   with:
+    #     upload_url: ${{ steps.create_release.outputs.upload_url }} 
+    #     asset_path: .build/text.xcframework.zip
+    #     asset_name: text.xcframework.zip
+    #     asset_content_type: application/zip
