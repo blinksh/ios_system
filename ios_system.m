@@ -1312,7 +1312,7 @@ int cd_main(int argc, char** argv) {
         // But not Objective-C? Weird.
         // Do it in Swift (new dictionary each time), then store it, then move to Objective-C?
         void (*function)(NSString*) = NULL;
-        function = dlsym(RTLD_MAIN_ONLY, "storeDirectoryUsed");
+        function = dlsym(RTLD_DEFAULT, "storeDirectoryUsed");
         if (function != NULL) {
             NSString *key = @(ios_getBookmarkedVersion(newDir.UTF8String));
             function(key);
@@ -2242,7 +2242,7 @@ void ios_stopInteractive(void) {
     // Some commands, like sftp, start as "interactive" (they handle all input), then become non-interactive (they let the shell handle input)
     // This could be merged with opentty / closetty above, but stopInteractive involves one more trip to WKWebView->evaluateJS, so it's better not to call it too often.
     void (*function)(void) = NULL;
-    function = dlsym(RTLD_MAIN_ONLY, "stopInteractive");
+    function = dlsym(RTLD_DEFAULT, "stopInteractive");
     if (function != NULL) {
         function();
     } else {
@@ -2253,7 +2253,7 @@ void ios_stopInteractive(void) {
 int ios_storeInteractive(void) {
     // Some commands, like dash, can be started from inside interactive or non-interactive commands. They need to restore the status afterwards.
     int (*function)(void) = NULL;
-    function = dlsym(RTLD_MAIN_ONLY, "storeInteractive");
+    function = dlsym(RTLD_DEFAULT, "storeInteractive");
     if (function != NULL) {
         return function();
     } else {
@@ -2265,7 +2265,7 @@ int ios_storeInteractive(void) {
 void ios_startInteractive(void) {
     // With aliasing, we can have commands that are interactive and not detected by the command-line interpreter.
     void (*function)() = NULL;
-    function = dlsym(RTLD_MAIN_ONLY, "startInteractive");
+    function = dlsym(RTLD_DEFAULT, "startInteractive");
     if (function != NULL) {
         function();
     } else {
@@ -2314,7 +2314,7 @@ void* ios_getContext(void) {
 void replaceCommand(NSString* commandName, NSString* functionName, bool allOccurences) {
     // Does that function exist / is reachable? We've had problems with stripping.
     int (*function)(int ac, char** av) = NULL;
-    function = dlsym(RTLD_MAIN_ONLY, functionName.UTF8String);
+    function = dlsym(RTLD_DEFAULT, functionName.UTF8String);
     if (!function) {
         NSLog(@"replaceCommand: %@ does not exist", functionName);
         return; // if not, we don't replace.
@@ -3550,7 +3550,7 @@ int ios_system(const char* inputCmd) {
                 }
             }
             if ([libraryName isEqualToString: @"SELF"]) handle = RTLD_SELF;  // commands defined in ios_system.framework
-            else if ([libraryName isEqualToString: @"MAIN"]) handle = RTLD_MAIN_ONLY; // commands defined in main program
+            else if ([libraryName isEqualToString: @"MAIN"]) handle = RTLD_DEFAULT; // commands defined in main program
             else handle = dlopen(libraryName.UTF8String, RTLD_LAZY | RTLD_GLOBAL); // commands defined in dynamic library
             if (handle == NULL) {
                 char* errorLoading = strdup(dlerror());
