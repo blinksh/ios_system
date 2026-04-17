@@ -10,9 +10,9 @@ OutputLevel.default = .error
 let platforms: [Platform] = [.iPhoneOS, .iPhoneSimulator, .Catalyst]
 
 let allSchemes = [
-    //"ios_system",
+    "ios_system",
     //"awk",
-    "curl_ios",
+    //"curl_ios",
     //"files",
     //"shell",
     // "ssh_cmd",
