@@ -64,16 +64,16 @@ jobs:
     #     asset_name: commandDictionary.plist
     #     asset_content_type: text/plain
 
-    # - name: Upload ios_system
-    #   id: upload-ios_system
-    #   uses: actions/upload-release-asset@v1
-    #   env:
-    #     GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-    #   with:
-    #     upload_url: ${{ steps.create_release.outputs.upload_url }} 
-    #     asset_path: .build/ios_system.xcframework.zip
-    #     asset_name: ios_system.xcframework.zip
-    #     asset_content_type: application/zip
+    - name: Upload ios_system
+      id: upload-ios_system
+      uses: actions/upload-release-asset@v1
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      with:
+        upload_url: ${{ steps.create_release.outputs.upload_url }} 
+        asset_path: .build/ios_system.xcframework.zip
+        asset_name: ios_system.xcframework.zip
+        asset_content_type: application/zip
     # - name: Upload awk.xcframework
     #   id: upload-awk
     #   uses: actions/upload-release-asset@v1
