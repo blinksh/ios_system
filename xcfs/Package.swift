@@ -11,11 +11,16 @@ _ = Package(
     targets: [
         // ssh2:
         // .binaryTarget(
-      .binaryTarget(
-        name: "openssl",
-        url: "https://github.com/blinksh/openssl-apple/releases/download/v1.1.1k/openssl-dynamic.xcframework.zip",
-        checksum: "9a7cc2686122e62445b85a8ce04f49379d99c952b8ea3534127c004b8a00af59"
-      ),
+        .binaryTarget(
+          name: "openssl",
+          url: "https://github.com/krzyzanowskim/OpenSSL/releases/download/3.6.0001/OpenSSL.xcframework.zip",
+          checksum: "f2954129976a2d990d20e371d837163f9cc6b7d9191e07380b8690ef7322bf50"
+        ),
+      // .binaryTarget(
+      //   name: "openssl",
+      //   url: "https://github.com/blinksh/openssl-apple/releases/download/v1.1.1k/openssl-dynamic.xcframework.zip",
+      //   checksum: "9a7cc2686122e62445b85a8ce04f49379d99c952b8ea3534127c004b8a00af59"
+      // ),
         //     name: "libssh2",
         //     url: "https://github.com/holzschu/libssh2-apple/releases/download/v1.11.0/libssh2-dynamic.xcframework.zip",
         //     checksum: "cacfe1789b197b727119f7e32f561eaf9acc27bf38cd19975b74fce107f868a6"

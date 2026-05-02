@@ -459,6 +459,7 @@
 /* #undef HAVE_OLD_GSSMIT */
 
 /* Define to 1 if using OpenSSL 3 or later. */
+ #define HAVE_OPENSSL3 1
 /* #undef HAVE_OPENSSL3 */
 
 /* Define to 1 if you have the <openssl/crypto.h> header file. */
